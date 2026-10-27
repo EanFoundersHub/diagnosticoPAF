@@ -775,7 +775,14 @@ return out;
     e.style.color = esError ? '#9d352e' : 'var(--muted)';
     actualizarAvisoSalida();
   }
-  function protegerEmpresa() { if (empresaAutorizada) st.empresa = empresaAutorizada; }
+  function protegerEmpresa() {
+    if (empresaAutorizada) st.empresa = empresaAutorizada;
+    if (!st.inst || typeof st.inst !== 'object') st.inst = { deuda:true, equity:false };
+    if (st.inst.deuda !== true) {
+      st.inst.deuda = true;
+      if (cargado && !bloqueado) pendiente = true;
+    }
+  }
   const ensureId = () => {
     if (!st.id) st.id = 'R' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     return st.id;
@@ -903,6 +910,7 @@ return out;
       }
       revisionActual = Number(registrado.revision || 0);
       const local = leerLocal();
+      const deudaRemotaOmitida = !remoto.inst || remoto.inst.deuda !== true;
       // Nunca permitir que un borrador de otra empresa cargue en esta pagina.
       if (local && local.empresa === empresaAutorizada && local.pendiente) {
         if (Number(local.revision) !== revisionActual) {
@@ -920,6 +928,7 @@ return out;
       }
       st = Object.assign(E.nuevo(), remoto);
       protegerEmpresa();
+      if (deudaRemotaOmitida) pendiente = true;
       if (pendiente) {
         const t = local && Date.parse(local.actualizadoEn);
         ultimoCambio = Number.isFinite(t) && t > 0 ? Math.min(t, Date.now()) : Date.now();
@@ -1064,7 +1073,7 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     const pDiagnostico = E.prog(st);
     const precargaResumen = '<div class="swc-preload-summary" role="status"><div class="swc-preload-head"><b>' + numPrecarga + ' cifras financieras precargadas</b>' + (porValidar ? '<span class="swc-preload-review">' + porValidar + ' marcadas para validar</span>' : '') + '</div><p class="small" style="margin:7px 0 0">Se recuperaron del expediente de esta empresa. Revise las cifras en la sección <b>Cifras financieras</b> y corrija las que correspondan.</p><p class="small muted" style="margin:5px 0 0">El avance (' + pDiagnostico.hechas + ' de ' + pDiagnostico.total + ') cuenta solo los datos exigidos para completar el diagnóstico; algunas cifras financieras son opcionales.</p></div>';
     let h = '<div class="card"><div style="margin-bottom:16px"><b>Información precargada de su empresa</b><p class="small muted" style="margin:5px 0 0">Sus datos se recuperaron de SharePoint a través del enlace individual. Revise las cifras financieras y actualícelas cuando sea necesario.</p></div>' + precargaResumen + '<div class="grid" style="margin:0"><div><label class="fld" for="emp">Nombre de la empresa</label><input type="text" id="emp" value="' + esc(st.empresa) + '" readonly aria-readonly="true" title="Esta empresa está asociada con su enlace individual"></div>' +
-      '<div><label class="fld">¿Qué tipo de financiación busca?</label><div class="chips"><label class="tog"><input type="checkbox" data-inst="deuda"' + (st.inst.deuda ? ' checked' : '') + '> Deuda</label><label class="tog"><input type="checkbox" data-inst="equity"' + (st.inst.equity ? ' checked' : '') + '> Equity (inversión)</label></div></div></div>' +
+      '<div><label class="fld">¿Qué tipo de financiación busca?</label><div class="chips"><label class="tog" title="Deuda es obligatoria en el diagnóstico"><input type="checkbox" data-inst="deuda" checked disabled aria-label="Deuda obligatoria"> Deuda <span class="small">(obligatoria)</span></label><label class="tog"><input type="checkbox" data-inst="equity"' + (st.inst.equity ? ' checked' : '') + '> Equity (inversión)</label></div></div></div>' +
       '<p class="small muted" style="margin:12px 0 0">Sus respuestas se guardan en este navegador mientras diligencia el formulario y se respaldan en SharePoint al cambiar de sección o al finalizar. Descargue también el reporte HTML como copia personal. <label class="btn noprint" style="padding:5px 12px;font-size:12.5px;cursor:pointer;margin-left:6px">Cargar un reporte anterior<input type="file" accept=".html" id="load" hidden></label></p></div>';
     h += '<div class="steps">' + gs.map(([g, n], i) => '<button class="step" data-g="' + g + '"' + (g === grupo ? ' aria-current="true"' : '') + '><b>' + (i + 1) + '. ' + n + '</b><span></span><div class="track"><div class="fill"></div></div></button>').join('') + '</div>';
     h += '<div class="card">';
@@ -1345,7 +1354,10 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
       const ot = qq.opciones.find(x => x.texto), inp = document.querySelector('[data-mo="' + q + '"]'); if (ot && inp) { inp.disabled = !s.s.includes(ot.k); if (inp.disabled) { s.otra = ''; inp.value = ''; } }
     }
     else if (t.dataset.nd) { const k = t.dataset.nd, inp = document.getElementById('f_' + k); if (t.checked) { st.f[k] = 'nd'; inp.value = ''; inp.disabled = true; } else { delete st.f[k]; inp.disabled = false; } document.getElementById('h_' + k).textContent = ''; }
-    else if (t.dataset.inst) { st.inst[t.dataset.inst] = t.checked; save(); render(); return; }
+    else if (t.dataset.inst) {
+      if (t.dataset.inst === 'deuda') { t.checked = true; protegerEmpresa(); return; }
+      st.inst.equity = t.checked; save(); render(); return;
+    }
     else if (t.classList.contains('unit')) { st.us = st.us || {}; st.us[t.dataset.uq] = +t.value; document.querySelectorAll('[data-f]').forEach(i => { document.getElementById('h_' + i.dataset.f).textContent = hint(i.dataset.f); }); }
     else if (t.dataset.fup) { subirArchivos(t); return; }
     else if (t.id === 'load') { const f = t.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { try { const m = /<script type="application\/json" id="respuestas-dx">([\s\S]*?)<\/script>/.exec(rd.result); const d = JSON.parse(m[1]); if (d.app !== 'dx-light') throw 0; if (!d.estado || d.estado.empresa !== empresaAutorizada) throw 0; st = Object.assign(E.nuevo(), d.estado); protegerEmpresa(); save(); render(); toast('Respuestas cargadas'); } catch (x) { toast('No se pudo leer ese archivo'); } }; rd.readAsText(f); return; }
