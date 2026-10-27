@@ -1014,9 +1014,10 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     return '<div class="area" style="background:var(--soft);border-radius:10px;padding:12px 14px;margin-bottom:8px"><div class="hd"><b>Score IR: calificación general de la empresa' + (inter ? infoBtn('ir', 'Score IR') : '') + '</b><span class="row" style="gap:8px">' + (b.madurez ? '<span class="chip ' + c + '">' + esc(b.madurez) + '</span>' : '') + estadoChip(b.estado) + '<b>' + b.score + '</b></span></div><div class="bar"><i class="c-' + c + '" style="width:' + b.score + '%"></i></div><div class="small muted" style="margin-top:5px">Promedio de las 7 áreas generales con los pesos de la plantilla IR v2. No incluye equity.</div></div>';
   }
   const infoBtn = (key, nombre) => '<button type="button" class="info" data-info="' + key + '" aria-label="Ver cómo se calculó: ' + esc(nombre) + '" title="Ver cómo se calculó">i</button>';
-  function donut(score, cls) {
+  function donut(score, cls, progreso = false) {
     const R = 52, L = 2 * Math.PI * R, f = score === null ? 0 : score / 100 * L;
-    return '<svg class="donut" width="130" height="130" viewBox="0 0 130 130" role="img" aria-label="Índice ' + (score === null ? 'sin datos' : score + ' de 100') + '"><circle cx="65" cy="65" r="' + R + '" fill="none" stroke="var(--soft)" stroke-width="13"/><circle cx="65" cy="65" r="' + R + '" fill="none" stroke="var(--' + (cls === 'none' ? 'line' : cls) + ')" stroke-width="13" stroke-linecap="round" stroke-dasharray="' + f + ' ' + L + '" transform="rotate(-90 65 65)"/><text x="65" y="72" text-anchor="middle" font-size="30" fill="var(--ink)">' + (score === null ? '—' : score) + '</text></svg>';
+    const label = progreso ? 'Avance del diagnóstico ' + score + ' por ciento' : 'Índice ' + (score === null ? 'sin datos' : score + ' de 100');
+    return '<svg class="donut" width="130" height="130" viewBox="0 0 130 130" role="img" aria-label="' + label + '"><circle cx="65" cy="65" r="' + R + '" fill="none" stroke="var(--soft)" stroke-width="13"/><circle cx="65" cy="65" r="' + R + '" fill="none" stroke="var(--' + (cls === 'none' ? 'line' : cls) + ')" stroke-width="13" stroke-linecap="round" stroke-dasharray="' + f + ' ' + L + '" transform="rotate(-90 65 65)"/><text x="65" y="72" text-anchor="middle" font-size="30" fill="var(--ink)">' + (score === null ? '—' : score + (progreso ? '%' : '')) + '</text></svg>';
   }
   const estadoChip = e => e === 'clasificado' ? '' : '<span class="chip warn">' + (e === 'provisional' ? 'Resultado provisional' : 'Faltan respuestas') + '</span>';
   function mini(titulo, b, sub, key, inter) {
@@ -1027,6 +1028,33 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
   }
   function radioHTML(r, inter) {
     const g = r.general;
+    // No confundir un puntaje estimado sobre muy pocas respuestas con el porcentaje completado.
+    // Mientras no exista una clasificacion evaluable, la radiografia presenta el avance real.
+    if (g.estado !== 'clasificado') {
+      const p = r.prog;
+      const tarjetaPendiente = (titulo, subtitulo) =>
+        '<div class="card"><div class="lbl">' + titulo + '</div>' +
+        '<div style="font-size:29px;font-weight:800;margin:20px 0 12px">Pendiente</div>' +
+        '<span class="chip warn">Datos insuficientes</span>' +
+        '<p class="small muted" style="margin:14px 0 0">' + subtitulo + '</p></div>';
+      let h = '<div class="grid"><div class="card">' +
+        '<div class="lbl">Avance del autodiagnóstico</div><div class="big">' +
+        donut(p.pct, 'mid', true) +
+        '<div><div style="font-size:23px;font-weight:800">' + p.pct + ' % completado</div>' +
+        '<p class="small muted" style="margin:7px 0 12px">' + p.hechas + ' de ' + p.total + ' respuestas completadas.</p>' +
+        '<span class="chip warn">Radiografía pendiente</span></div></div></div>' +
+        (r.deuda ? tarjetaPendiente('Preparación para deuda', 'Se calculará una calificación cuando haya información suficiente.') : '') +
+        (r.equity ? tarjetaPendiente('Preparación para equity', 'Se calculará una calificación cuando haya información suficiente.') : '') +
+        '</div>';
+      h += '<div class="card"><h3>Su radiografía está en construcción</h3>' +
+        '<p>El avance (' + p.pct + ' %) mide cuánto del formulario ha completado; <b>no es una calificación de financiabilidad</b>. ' +
+        'Los puntajes calculados con datos insuficientes no se muestran, para evitar conclusiones equivocadas.</p>' +
+        '<p class="small muted">Continúe el autodiagnóstico. Cuando se cumplan los requisitos de cobertura y calidad de información, aquí aparecerán el índice, la preparación para deuda y equity, y las fortalezas y prioridades.</p>' +
+        '<button class="btn p noprint" type="button" data-tab="empresa">Continuar autodiagnóstico</button></div>';
+      h += '<div class="card"><b>Progreso del diagnóstico: ' + p.hechas + ' de ' + p.total + ' respuestas (' + p.pct + ' %)</b>' +
+        '<div class="track" style="margin-top:12px"><div class="fill" style="width:' + p.pct + '%"></div></div></div>';
+      return h;
+    }
     let h = '<div class="grid"><div class="card"><div class="lbl">Índice de financiabilidad' + (inter && g.score !== null ? infoBtn('general', 'Índice de financiabilidad') : '') + '</div><div class="big">' + donut(g.score, CLSM(g.score)) + '<div>' +
       (g.score !== null ? '<span class="chip ' + CLSM(g.score) + '" style="font-size:14px">' + esc(g.madurez || 'Sin clasificar') + '</span>' : '<span class="chip">Sin datos suficientes</span>') +
       '<div style="margin-top:8px">' + estadoChip(g.estado) + '</div><p class="small muted" style="margin:8px 0 0">' + (g.modo === 'areas' ? 'Resume las 7 áreas generales, ponderadas por importancia.' : r.deuda && r.equity ? 'Promedio de su preparación para deuda y para equity: sube cuando la empresa puede acceder a ambas.' : 'Equivale a su preparación para ' + (r.deuda ? 'deuda' : 'equity') + ', porque solo busca ese tipo de financiación.') + '</p></div></div></div>' +
@@ -1098,7 +1126,7 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
   function detalleReporte(r) {
     const todas = r.dims.concat(r.eq ? [r.eq] : []);
     return '<h2>Detalle del puntaje</h2><p class="small muted">El índice y la preparación para deuda son promedios ponderados de las áreas; cada área es el promedio de sus preguntas e indicadores (0 a 100). Lo que no se respondió no cuenta como cero.</p>' +
-      '<div class="card"><h3>Índice de financiabilidad</h3>' + (r.general.modo === 'areas' ? tablaPesos(r.dims) : tablaComps(r.general)) + '</div>' +
+      (r.general.estado === 'clasificado' ? '<div class="card"><h3>Índice de financiabilidad</h3>' + (r.general.modo === 'areas' ? tablaPesos(r.dims) : tablaComps(r.general)) + '</div>' : '<div class="card"><h3>Resultado pendiente</h3><p>El expediente aún no cumple los criterios para presentar una calificación de financiabilidad.</p></div>') +
       '<div class="card"><h3>Score IR: calificación general de la empresa</h3>' + tablaPesos(r.dims) + '</div>' +
       (r.deuda ? '<div class="card"><h3>Preparación para deuda</h3>' + tablaPesos(r.dims.filter(d => C.dimensiones.deuda.includes(d.id))) + '</div>' : '') +
       (r.equity ? '<div class="card"><h3>Preparación para equity</h3>' + tablaPesos(r.equityDims) + '</div>' : '') +
@@ -1125,7 +1153,7 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
       '<tr><td>' + esc(f.pregunta) + '</td><td>' + (f.cifra && typeof f.respuesta === 'number' ? esc(cop(f.respuesta)) : esc(f.respuesta === '' || f.respuesta == null ? '—' : f.respuesta)) + '</td><td>' + esc(f.comentario || '') + '</td></tr>').join('') + '</tbody></table></div>').join('');
     const datos = JSON.stringify({ app: 'dx-light', version: B.version, fecha: new Date().toISOString(), estado: st }).replace(/</g, '\\u003c');
     const css = [...document.querySelectorAll('style')].map(s => s.textContent).filter(t => t.includes('--brand')).join('\n');
-    return '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"><title>Radiografía · ' + esc(st.empresa || 'Empresa') + '</title><style>' + css + '</style></head><body><div class="wrap"><header class="top"><div class="logo">R</div><div><h1>Radiografía de financiabilidad</h1><div class="sub">' + esc(st.empresa || 'Empresa') + ' · ' + fecha + '</div></div></header><main>' + radioHTML(r, false) + detalleReporte(r) + tabla + '</main></div><script type="application/json" id="respuestas-dx">' + datos + '<\/script></body></html>';
+    return '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"><title>Radiografía · ' + esc(st.empresa || 'Empresa') + '</title><style>' + css + '</style></head><body><div class="wrap"><header class="top"><div class="logo">R</div><div><h1>Radiografía de financiabilidad</h1><div class="sub">' + esc(st.empresa || 'Empresa') + ' · ' + fecha + '</div></div></header><main>' + radioHTML(r, false) + (r.general.estado === 'clasificado' ? detalleReporte(r) : '') + tabla + '</main></div><script type="application/json" id="respuestas-dx">' + datos + '<\/script></body></html>';
   }
   async function descargar(nombre, html) {
     try { if (window.claude && claude.use) { const d = await claude.use('downloads'); if (d) { await d.save({ filename: nombre, data: html }); return; } } } catch (e) { if (e && e.code === 'declined') return; }
