@@ -576,7 +576,7 @@ preguntas(st, g).forEach(q => { cur = q.texto;
     }
     function prog(st, g) {
       const u = unidades(st, g), h = u.filter(x => x.ok).length;
-      return { pend: [...new Set(u.filter(x => !x.ok).map(x => x.qt))], hechas: h, total: u.length, pct: u.length ? Math.round(h / u.length * 100) : 0, min_total: Math.round(u.reduce((s, x) => s + x.min, 0)), min_rest: Math.ceil(u.filter(x => !x.ok).reduce((s, x) => s + x.min, 0)) };
+      return { pend: [...new Set(u.filter(x => !x.ok).map(x => x.qt))], hechas: h, total: u.length, pct: u.length ? (h === u.length ? 100 : Math.min(99, Math.round(h / u.length * 100))) : 0, min_total: Math.round(u.reduce((s, x) => s + x.min, 0)), min_rest: Math.ceil(u.filter(x => !x.ok).reduce((s, x) => s + x.min, 0)) };
     }
 
     function alertas(st) {
@@ -864,7 +864,8 @@ return out;
     ultimoCambio = Date.now();
     guardarLocal();
     programarAvisoFlotante();
-    const completo = E.prog(st).pct === 100;
+    const avance = E.prog(st);
+    const completo = avance.total > 0 && avance.hechas === avance.total;
     if (completo && !completoAnterior) void sync();
     completoAnterior = completo;
   };
@@ -953,9 +954,9 @@ return out;
 /* ---------- progreso ---------- */
   function renderProg() {
     const p = E.prog(st);
-    $('#pg').innerHTML = '<span class="num">' + p.pct + ' %</span><div class="track" role="progressbar" aria-valuenow="' + p.pct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Avance del autodiagnóstico"><div class="fill" style="width:' + p.pct + '%"></div></div><span class="txt">' + p.hechas + ' de ' + p.total + ' respuestas</span>' + (p.pct === 100 ? '<button type="button" class="btn p rep noprint" style="padding:6px 14px;font-size:13px;white-space:nowrap">Descargar reporte</button>' : '');
-    const dc = document.getElementById('doneCard'); if (dc) dc.innerHTML = p.pct === 100 ? DONE_HTML : '';
-if (p.pct === 100 && lastPct >= 0 && lastPct < 100) toast('¡Listo! Descargue su reporte HTML para conservar sus respuestas');
+    $('#pg').innerHTML = '<span class="num">' + p.pct + ' %</span><div class="track" role="progressbar" aria-valuenow="' + p.pct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Avance del autodiagnóstico"><div class="fill" style="width:' + p.pct + '%"></div></div><span class="txt">' + p.hechas + ' de ' + p.total + ' respuestas</span>' + (p.total > 0 && p.hechas === p.total ? '<button type="button" class="btn p rep noprint" style="padding:6px 14px;font-size:13px;white-space:nowrap">Descargar reporte</button>' : '');
+    const dc = document.getElementById('doneCard'); if (dc) dc.innerHTML = p.total > 0 && p.hechas === p.total ? DONE_HTML : '';
+if (p.total > 0 && p.hechas === p.total && lastPct >= 0 && lastPct < 100) toast('¡Listo! Descargue su reporte HTML para conservar sus respuestas');
 lastPct = p.pct;
 document.querySelectorAll('.step').forEach(b => {
       const g = b.dataset.g, q = E.prog(st, g);
@@ -1109,7 +1110,7 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     const g = r.general;
     // No confundir un puntaje estimado sobre muy pocas respuestas con el porcentaje completado.
     // Mientras no exista una clasificacion evaluable, la radiografia presenta el avance real.
-    if (g.estado !== 'clasificado') {
+    if (g.estado !== 'clasificado' || r.prog.hechas !== r.prog.total) {
       const p = r.prog;
       const tarjetaPendiente = (titulo, subtitulo) =>
         '<div class="card"><div class="lbl">' + titulo + '</div>' +
@@ -1163,8 +1164,8 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
   function viewRadio() {
     const r = E.radiografia(st);
     if (!r.prog.hechas) return '<div class="card empty"><h3>Aún no hay respuestas</h3><p class="muted">Complete el autodiagnóstico para ver su radiografía.</p><button class="btn p" data-tab="empresa">Ir al autodiagnóstico</button></div>';
-    const resumen = '<div class="row" style="justify-content:space-between;margin-bottom:6px"><div><b style="font-size:18px">' + esc(st.empresa || 'Su empresa') + '</b></div><button class="btn p noprint" id="rep">Descargar mi reporte (HTML)</button></div><p class="small muted noprint" style="margin:0 0 10px">Descargue y guarde el reporte: es su copia de respuestas y resultados, y puede volver a cargarlo en el autodiagnóstico.</p>' + radioHTML(r, true);
-    if (r.prog.pct !== 100) return resumen;
+    const resumen = '<div class="row" style="justify-content:space-between;margin-bottom:6px"><div><b style="font-size:18px">' + esc(st.empresa || 'Su empresa') + '</b></div><button class="btn p noprint" id="rep">' + (r.prog.hechas === r.prog.total ? 'Descargar mi reporte (HTML)' : 'Descargar borrador (HTML)') + '</button></div><p class="small muted noprint" style="margin:0 0 10px">Descargue y guarde el reporte: es su copia de respuestas y resultados, y puede volver a cargarlo en el autodiagnóstico.</p>' + radioHTML(r, true);
+    if (r.prog.hechas !== r.prog.total) return resumen + verPendientes();
     // Vista de solo lectura del reporte completado: los mismos datos del HTML descargable.
     const detalle = r.general.estado === 'clasificado'
       ? '<details class="swc-report-section"><summary>Detalle de los puntajes por área</summary>' + detalleReporte(r) + '</details>'
@@ -1256,9 +1257,11 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
   function reporte() {
     const r = E.radiografia(st), fecha = new Date().toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric' });
     const tabla = respuestasHTML(E.filas(st), false);
+    const esFinal = r.prog.total > 0 && r.prog.hechas === r.prog.total;
+    const selloBorrador = esFinal ? '' : '<div class="card"><b>Borrador sin finalizar</b><p>Quedan ' + (r.prog.total-r.prog.hechas) + ' respuestas obligatorias. Esta copia no es un resultado final.</p></div>';
     const datos = JSON.stringify({ app: 'dx-light', version: B.version, fecha: new Date().toISOString(), estado: st }).replace(/</g, '\\u003c');
     const css = [...document.querySelectorAll('style')].map(s => s.textContent).filter(t => t.includes('--brand')).join('\n');
-    return '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"><title>Radiografía · ' + esc(st.empresa || 'Empresa') + '</title><style>' + css + '</style></head><body><div class="wrap"><header class="top"><div class="logo">R</div><div><h1>Radiografía de financiabilidad</h1><div class="sub">' + esc(st.empresa || 'Empresa') + ' · ' + fecha + '</div></div></header><main>' + radioHTML(r, false) + (r.general.estado === 'clasificado' ? detalleReporte(r) : '') + tabla + '</main></div><script type="application/json" id="respuestas-dx">' + datos + '<\/script></body></html>';
+    return '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"><title>Radiografía · ' + esc(st.empresa || 'Empresa') + '</title><style>' + css + '</style></head><body><div class="wrap"><header class="top"><div class="logo">R</div><div><h1>Radiografía de financiabilidad</h1><div class="sub">' + esc(st.empresa || 'Empresa') + ' · ' + fecha + '</div></div></header><main>' + selloBorrador + radioHTML(r, false) + (esFinal && r.general.estado === 'clasificado' ? detalleReporte(r) : '') + tabla + '</main></div><script type="application/json" id="respuestas-dx">' + datos + '<\/script></body></html>';
   }
   async function descargar(nombre, html) {
     try { if (window.claude && claude.use) { const d = await claude.use('downloads'); if (d) { await d.save({ filename: nombre, data: html }); return; } } } catch (e) { if (e && e.code === 'declined') return; }
@@ -1327,7 +1330,9 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     const t = e.target.closest('[data-tab],[data-go],.step,#rep,.rep'); if (!t) return;
     if (t.id === 'rep' || t.classList.contains('rep')) {
       protegerEmpresa();
-      descargar('Radiografia_' + st.empresa.replace(/[^\w]+/g, '_') + '.html', reporte());
+      const avance = E.prog(st);
+      const nombre = (avance.total && avance.hechas === avance.total ? 'Radiografia_' : 'Borrador_Radiografia_') + st.empresa.replace(/[^\w]+/g, '_') + '.html';
+      descargar(nombre, reporte());
       void sync(); return;
     }
     const tabAntes = tab, grupoAntes = grupo;
