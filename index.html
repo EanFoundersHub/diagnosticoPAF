@@ -386,6 +386,18 @@ label.mxc:hover{border-color:var(--line)}
 .swc-aviso-flotante .btn{width:100%;justify-content:center}
 @media(max-width:640px){.swc-aviso-flotante{right:12px;bottom:12px;width:calc(100vw - 24px);padding:14px 16px}}
 @media print{.swc-aviso-flotante{display:none!important}}
+/* Detalle del diagnostico final, sin sobrecargar la vista principal. */
+.swc-radiografia-respuestas{margin-top:30px}
+.swc-report-section,.swc-report-group{border:1px solid var(--line);background:var(--surface);border-radius:var(--r);margin:12px 0;overflow:hidden}
+.swc-report-section>summary,.swc-report-group>summary{cursor:pointer;padding:15px 18px;font-size:15px;font-weight:700;list-style-position:inside;color:var(--ink)}
+.swc-report-section[open]>summary,.swc-report-group[open]>summary{border-bottom:1px solid var(--line)}
+.swc-report-section>p{padding:0 18px}
+.swc-report-section .swc-report-group{margin:12px 16px}
+.swc-report-section .card{margin:12px 16px}
+.swc-report-section .tw{overflow-x:auto}
+.swc-report-section .tw table{min-width:560px}
+.swc-report-section .tw td{overflow-wrap:anywhere}
+@media(max-width:640px){.swc-report-section .swc-report-group,.swc-report-section .card{margin:9px}.swc-report-section>summary,.swc-report-group>summary{padding:13px 11px}}
 </style>
 </head><body>
 <a class="skip" href="#app">Ir al contenido</a>
@@ -1142,7 +1154,18 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
   function viewRadio() {
     const r = E.radiografia(st);
     if (!r.prog.hechas) return '<div class="card empty"><h3>Aún no hay respuestas</h3><p class="muted">Complete el autodiagnóstico para ver su radiografía.</p><button class="btn p" data-tab="empresa">Ir al autodiagnóstico</button></div>';
-    return '<div class="row" style="justify-content:space-between;margin-bottom:6px"><div><b style="font-size:18px">' + esc(st.empresa || 'Su empresa') + '</b></div><button class="btn p noprint" id="rep">Descargar mi reporte (HTML)</button></div><p class="small muted noprint" style="margin:0 0 10px">Descargue y guarde el reporte: es su copia de respuestas y resultados, y puede volver a cargarlo en el autodiagnóstico.</p>' + radioHTML(r, true);
+    const resumen = '<div class="row" style="justify-content:space-between;margin-bottom:6px"><div><b style="font-size:18px">' + esc(st.empresa || 'Su empresa') + '</b></div><button class="btn p noprint" id="rep">Descargar mi reporte (HTML)</button></div><p class="small muted noprint" style="margin:0 0 10px">Descargue y guarde el reporte: es su copia de respuestas y resultados, y puede volver a cargarlo en el autodiagnóstico.</p>' + radioHTML(r, true);
+    if (r.prog.pct !== 100) return resumen;
+    // Vista de solo lectura del reporte completado: los mismos datos del HTML descargable.
+    const detalle = r.general.estado === 'clasificado'
+      ? '<details class="swc-report-section"><summary>Detalle de los puntajes por área</summary>' + detalleReporte(r) + '</details>'
+      : '<p class="small muted">La empresa completó las respuestas requeridas, pero aún no hay información suficiente para emitir una clasificación financiera.</p>';
+    const formulario = '<details class="swc-report-section" open><summary>Formulario diligenciado · preguntas y respuestas</summary>' +
+      respuestasHTML(E.filas(st), true) + '</details>';
+    return resumen + '<section class="swc-radiografia-respuestas" aria-label="Detalle del diagnóstico completado">' +
+      '<h2>Detalle del diagnóstico completado</h2><p class="small muted">Aquí puede consultar las respuestas tal como aparecen en el reporte descargable. Las secciones pueden desplegarse para ver sus preguntas y cifras.</p>' +
+      detalle + formulario + '</section>';
+
   }
 
   /* ---------- detalle del cálculo ---------- */
@@ -1204,11 +1227,26 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
   });
 
   /* ---------- reporte descargable ---------- */
+  function respuestasHTML(filas, desplegables = false) {
+    const grupos = [...new Set(filas.map(f => f.grupo))];
+    return grupos.map((grupo, indice) => {
+      const delGrupo = filas.filter(f => f.grupo === grupo);
+      const tabla = '<div class="card tw"><table><thead><tr><th>Pregunta</th><th>Respuesta</th><th>Comentario</th></tr></thead><tbody>' +
+        delGrupo.map(f => '<tr><td>' + esc(f.pregunta) + '</td><td>' +
+          (f.cifra && typeof f.respuesta === 'number' ? esc(cop(f.respuesta)) : esc(f.respuesta === '' || f.respuesta == null ? '—' : f.respuesta)) +
+          '</td><td>' + esc(f.comentario || '') + '</td></tr>').join('') +
+        '</tbody></table></div>';
+      if (desplegables) {
+        return '<details class="swc-report-group"' + (indice === 0 ? ' open' : '') + '><summary>' +
+          esc(grupo) + ' · ' + delGrupo.length + ' registros</summary>' + tabla + '</details>';
+      }
+      return '<h2>Respuestas · ' + esc(grupo) + '</h2>' + tabla;
+    }).join('');
+  }
+
   function reporte() {
     const r = E.radiografia(st), fecha = new Date().toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric' });
-    const filas = E.filas(st), gs = [...new Set(filas.map(f => f.grupo))];
-    const tabla = gs.map(g => '<h2>Respuestas · ' + g + '</h2><div class="card tw"><table><thead><tr><th>Pregunta</th><th>Respuesta</th><th>Comentario</th></tr></thead><tbody>' + filas.filter(f => f.grupo === g).map(f =>
-      '<tr><td>' + esc(f.pregunta) + '</td><td>' + (f.cifra && typeof f.respuesta === 'number' ? esc(cop(f.respuesta)) : esc(f.respuesta === '' || f.respuesta == null ? '—' : f.respuesta)) + '</td><td>' + esc(f.comentario || '') + '</td></tr>').join('') + '</tbody></table></div>').join('');
+    const tabla = respuestasHTML(E.filas(st), false);
     const datos = JSON.stringify({ app: 'dx-light', version: B.version, fecha: new Date().toISOString(), estado: st }).replace(/</g, '\\u003c');
     const css = [...document.querySelectorAll('style')].map(s => s.textContent).filter(t => t.includes('--brand')).join('\n');
     return '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"><title>Radiografía · ' + esc(st.empresa || 'Empresa') + '</title><style>' + css + '</style></head><body><div class="wrap"><header class="top"><div class="logo">R</div><div><h1>Radiografía de financiabilidad</h1><div class="sub">' + esc(st.empresa || 'Empresa') + ' · ' + fecha + '</div></div></header><main>' + radioHTML(r, false) + (r.general.estado === 'clasificado' ? detalleReporte(r) : '') + tabla + '</main></div><script type="application/json" id="respuestas-dx">' + datos + '<\/script></body></html>';
