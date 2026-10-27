@@ -398,6 +398,11 @@ label.mxc:hover{border-color:var(--line)}
 .swc-report-section .tw table{min-width:560px}
 .swc-report-section .tw td{overflow-wrap:anywhere}
 @media(max-width:640px){.swc-report-section .swc-report-group,.swc-report-section .card{margin:9px}.swc-report-section>summary,.swc-report-group>summary{padding:13px 11px}}
+.swc-validacion{background:var(--warn-soft);border-left:4px solid var(--warn);padding:14px 16px;margin:14px 0;border-radius:var(--r)}
+.swc-validacion b{display:block;font-weight:700}
+.swc-validacion ul{padding-left:20px;margin:8px 0 14px;font-size:13.5px}
+.swc-validacion li{padding:4px 0}
+.swc-validacion li b{display:inline}
 </style>
 </head><body>
 <a class="skip" href="#app">Ir al contenido</a>
@@ -1083,7 +1088,13 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
       if (q.seccion !== sec) { sec = q.seccion; h += '<div class="sec">' + esc(sec) + '</div>' + ((B.meta.notas_seccion || {})[sec] ? '<p class="small muted" style="margin:0 0 4px">' + esc(B.meta.notas_seccion[sec]) + '</p>' : ''); }
       h += q.tipo === 'cifras' ? renderCifras(q) : renderQ(q, n); if (q.tipo !== 'cifras') n++;
     });
-    h += '</div><div id="doneCard" class="noprint"></div><div class="nav noprint">' + (idx > 0 ? '<button class="btn" data-go="' + gs[idx - 1][0] + '">← ' + gs[idx - 1][1] + '</button>' : '<span></span>') +
+    const faltantes = E.prog(st,grupo);
+    if (faltantes.hechas < faltantes.total) {
+      h += '</div><div class="swc-validacion noprint" role="status"><b>Quedan ' +
+        (faltantes.total - faltantes.hechas) + ' respuestas obligatorias en ' + esc(gs[idx][1]) +
+        '</b><p class="small">Puede guardar el borrador, pero para finalizar debe responder todos los campos obligatorios. Las cifras opcionales pueden quedar vacías.</p></div>';
+    } else h += '</div>';
+    h += '<div id="doneCard" class="noprint"></div><div class="nav noprint">' + (idx > 0 ? '<button class="btn" data-go="' + gs[idx - 1][0] + '">← ' + gs[idx - 1][1] + '</button>' : '<span></span>') +
       (idx < gs.length - 1 ? '<button class="btn p" data-go="' + gs[idx + 1][0] + '">Siguiente: ' + gs[idx + 1][1] + ' →</button>' : '<button class="btn p" data-tab="radio">Ver mi radiografía →</button>') + '</div>';
     return h;
   }
@@ -1160,6 +1171,22 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
       '<div class="card"><h3>Prioridades para acceder a financiación</h3><p class="small muted">Hasta ' + C.prioridades.max + ' puntos que más pesan para que un financiador o inversionista pueda evaluarlo, según el tipo de financiación que busca.</p>' + (r.brechas.length ? r.brechas.map(pri).join('') : '<p class="muted small">No se detectaron brechas relevantes para acceder a financiación con las respuestas actuales.</p>') + '</div></div>';
     h += '<p class="small muted">Resultado orientativo basado en lo que usted declaró. No constituye una calificación crediticia dada por alguna fuente de financiación ni garantiza la aprobación de un crédito o inversión; solo orienta la focalización de procesos de acompañamiento para fortalecer la capacidad de acceso a financiación. Reglas de puntaje en revisión.</p>';
     return h;
+  }
+  function verPendientes() {
+    const total = E.prog(st);
+    if (total.total > 0 && total.hechas === total.total) return '';
+    const faltan = E.GRUPOS.filter(([id]) => E.visG(id,st))
+      .map(([id,nombre]) => ({id,nombre, avance:E.prog(st,id)}))
+      .filter(x => x.avance.hechas < x.avance.total);
+    if (!faltan.length) return '';
+    return '<section class="swc-validacion" aria-label="Respuestas pendientes">' +
+      '<b>Faltan ' + (total.total - total.hechas) + ' respuestas obligatorias para finalizar</b>' +
+      '<p class="small">Puede guardar un borrador y continuar después. Para obtener la radiografía final, complete estas secciones:</p><ul>' +
+      faltan.map(x => '<li><b>' + esc(x.nombre) + ': ' + (x.avance.total - x.avance.hechas) +
+        ' pendientes.</b> ' + esc(x.avance.pend.slice(0,2).join('; ')) +
+        (x.avance.pend.length > 2 ? '…' : '') + '</li>').join('') +
+      '</ul><button type="button" class="btn p noprint" data-go="' + faltan[0].id +
+      '">Ir a ' + esc(faltan[0].nombre) + '</button></section>';
   }
   function viewRadio() {
     const r = E.radiografia(st);
