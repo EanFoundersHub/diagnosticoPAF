@@ -159,6 +159,10 @@ details.c summary::before{content:"+";display:inline-grid;place-items:center;wid
 details.c[open] summary::before{content:"–"}
 details.c textarea{margin-top:6px;max-width:760px}
 .cif{display:grid;gap:18px 20px;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr))}
+.cif>div{display:grid;grid-template-rows:minmax(3.2em,auto) auto auto auto auto;align-content:start}
+.cif>div>label.fld{min-height:3.2em;display:flex;align-items:flex-start}
+@supports (grid-template-rows:subgrid){.cif>div{grid-template-rows:subgrid;grid-row:span 5}}
+@media(max-width:640px){.cif>div{display:block;grid-row:auto}.cif>div>label.fld{min-height:0}}
 .cif .hint,.ct .hint{font-size:13px;color:var(--brand);min-height:20px;margin-top:4px;font-variant-numeric:tabular-nums}
 .hint{font-size:13px;color:var(--muted)}
 .nd{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--muted);margin-top:2px;cursor:pointer;min-height:32px}
