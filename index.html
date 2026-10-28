@@ -1459,6 +1459,25 @@ return out;
   }
   const toast = m => { const t = $('#toast'); t.textContent = m; t.classList.add('on'); setTimeout(() => t.classList.remove('on'), 2800); };
   const cop = v => '$ ' + Math.round(v).toLocaleString('es-CO');
+  function formatoEntradaFinanciera(v) {
+    return typeof v === 'number' && Number.isFinite(v)
+      ? v.toLocaleString('es-CO', { maximumFractionDigits: 2, useGrouping: true })
+      : '';
+  }
+  function leerEntradaFinanciera(texto) {
+    let s = String(texto == null ? '' : texto).trim();
+    const negativo = s.startsWith('-');
+    s = s.replace(/-/g, '').replace(/\./g, '').replace(/[^\d,]/g, '');
+    const coma = s.indexOf(',');
+    let enteros = (coma >= 0 ? s.slice(0, coma) : s).replace(/\D/g, '');
+    const decimales = coma >= 0 ? s.slice(coma + 1).replace(/\D/g, '').slice(0, 2) : '';
+    if (!enteros && !decimales) return { valor: null, texto: negativo ? '-' : '' };
+    enteros = enteros.replace(/^0+(?=\d)/, '') || '0';
+    const valor = Number(enteros + (decimales ? '.' + decimales : '')) * (negativo ? -1 : 1);
+    const visible = Number(enteros).toLocaleString('es-CO', { maximumFractionDigits: 0, useGrouping: true }) +
+      (coma >= 0 ? ',' + decimales : '');
+    return { valor: Number.isFinite(valor) ? valor : null, texto: (negativo ? '-' : '') + visible };
+  }
   const grupos = () => E.GRUPOS.filter(([g]) => E.visG(g, st));
 
 	  const DONE_HTML = '<div class="al info" style="margin:18px 0 0;border-radius:var(--r);padding:16px 18px"><b style="font-size:16px">¡Completó el autodiagnóstico!</b><p style="margin:6px 0 12px">Sus cambios se guardan en este navegador y se respaldan automáticamente en SharePoint. Descargue también su reporte HTML como copia de sus respuestas y resultados.</p><div class="row"><button type="button" class="btn p rep">Descargar mi reporte (HTML)</button><button type="button" class="btn" data-tab="radio">Ver mi radiografía</button></div></div>';
@@ -1587,7 +1606,7 @@ const k = base + '|' + f.k + '|' + c.k, v = st.g[k], suf = f.suf || c.suf, al = 
 	  }
   function inpCell(c, extra) {
     const x = st.f[c.k], nd = x === 'nd';
-    return '<div class="money"><span>$</span><input type="number" step="any" inputmode="decimal" id="f_' + c.k + '" data-f="' + c.k + '"' + (c.neg ? '' : ' min="0"') + (nd ? ' disabled' : '') + ' value="' + (typeof x === 'number' ? x : '') + '" placeholder="0" aria-label="' + esc(c.t) + (c.col ? ' · ' + E.colLabel(c.col, st) : '') + '"></div>' +
+    return '<div class="money"><span>$</span><input type="text" inputmode="decimal" autocomplete="off" id="f_' + c.k + '" data-f="' + c.k + '"' + (nd ? ' disabled' : '') + ' value="' + formatoEntradaFinanciera(x) + '" placeholder="0" aria-label="' + esc(c.t) + (c.col ? ' · ' + E.colLabel(c.col, st) : '') + '"></div>' +
 	      '<div class="hint" id="h_' + c.k + '">' + hint(c.k) + '</div><label class="nd"><input type="checkbox" data-nd="' + c.k + '"' + (nd ? ' checked' : '') + '> ' + (extra || 'No tengo este dato') + '</label>' + controlPrecarga(c.k);
   }
   function renderCifras(q) {
@@ -1991,8 +2010,10 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     else if (t.dataset.tx) { let v = t.value; const mx = +t.dataset.max; if (mx && nPal(v) > mx) { v = limPal(v, mx); t.value = v; } st.tx = st.tx || {}; st.tx[t.dataset.tx] = v; const c = document.getElementById('tc_' + t.dataset.tx); if (c) c.textContent = nPal(v) + ' / ' + mx + ' palabras'; renderProg(); }
     else if (t.dataset.mo) { const s = st.m[t.dataset.mo] = st.m[t.dataset.mo] || { s: [], otra: '' }; s.otra = t.value; }
 	    else if (t.dataset.f) {
-	      const k = t.dataset.f, c = CAMPOS[k], v = parseFloat(t.value), invalido = isFinite(v) && c && !c.neg && v < 0;
-	      if (isFinite(v)) { st.f[k] = v; if (!invalido) confirmarPrecargaEditada(k); } else delete st.f[k];
+	      const k = t.dataset.f, c = CAMPOS[k], lectura = leerEntradaFinanciera(t.value), v = lectura.valor;
+	      t.value = lectura.texto;
+	      const invalido = v !== null && c && !c.neg && v < 0;
+	      if (v !== null) { st.f[k] = v; if (!invalido) confirmarPrecargaEditada(k); } else delete st.f[k];
 	      t.setCustomValidity(invalido ? 'Esta cifra no puede ser negativa.' : '');
 	      document.getElementById('h_' + k).textContent = invalido ? 'Revise: esta cifra debe ser mayor o igual a 0.' : hint(k);
 	      renderProg();
