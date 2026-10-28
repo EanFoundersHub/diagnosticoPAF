@@ -457,7 +457,7 @@ label.mxc:hover{border-color:var(--line)}
     const nuevo = () => ({ empresa: '', inst: { deuda: true, equity: true }, u: 1, anio: new Date().getFullYear(), r: {}, f: {}, g: {}, m: {}, us: {}, tx: {}, fl: {} });
     const colLabel = (c, st) => { const y = (st && st.anio) || new Date().getFullYear(); return c === 'act' ? y + ' (a la fecha)' : c === 'c1' ? (y - 1) + ' (cierre)' : (y - 2) + ' (cierre)'; };
     const cuenta = c => !c.opt;
-    const visG = (g, st) => g === 'general' || g === 'impacto' || (g === 'deuda' && !!st.inst.deuda) || (g === 'equity' && !!st.inst.equity);
+    const visG = (g, st) => g === 'general' || g === 'impacto' || g === 'deuda' || (g === 'equity' && !!(st.inst && st.inst.equity));
     const preguntas = (st, g) => Q.filter(q => visG(q.grupo, st) && (!g || q.grupo === g));
     const opc = (q, k) => (q.opciones || []).find(o => o.k === k);
     const FQ = {}; Q.forEach(q => (q.campos || []).forEach(c => { FQ[c.k] = q.id; }));
@@ -958,6 +958,7 @@ return out;
   const DONE_HTML = '<div class="al info" style="margin:18px 0 0;border-radius:var(--r);padding:16px 18px"><b style="font-size:16px">¡Completó el autodiagnóstico!</b><p style="margin:6px 0 12px">Su avance se respalda en SharePoint al cambiar de sección. Descargue también su reporte HTML como copia de sus respuestas y resultados.</p><div class="row"><button type="button" class="btn p rep">Descargar mi reporte (HTML)</button><button type="button" class="btn" data-tab="radio">Ver mi radiografía</button></div></div>';
 /* ---------- progreso ---------- */
   function renderProg() {
+    protegerEmpresa();
     const p = E.prog(st);
     $('#pg').innerHTML = '<span class="num">' + p.pct + ' %</span><div class="track" role="progressbar" aria-valuenow="' + p.pct + '" aria-valuemin="0" aria-valuemax="100" aria-label="Avance del autodiagnóstico"><div class="fill" style="width:' + p.pct + '%"></div></div><span class="txt">' + p.hechas + ' de ' + p.total + ' respuestas</span>' + (p.total > 0 && p.hechas === p.total ? '<button type="button" class="btn p rep noprint" style="padding:6px 14px;font-size:13px;white-space:nowrap">Descargar reporte</button>' : '');
     const dc = document.getElementById('doneCard'); if (dc) dc.innerHTML = p.total > 0 && p.hechas === p.total ? DONE_HTML : '';
