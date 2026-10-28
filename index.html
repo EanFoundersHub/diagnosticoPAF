@@ -707,6 +707,75 @@ return out;
   if (typeof module !== 'undefined' && module.exports) module.exports = Engine; else root.Engine = Engine;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
+<script>// Conciliación pura de estados: permite resolver concurrencia sin perder respuestas.
+(function (root) {
+  const AUSENTE = Symbol('ausente');
+  const esObjeto = v => !!v && typeof v === 'object' && !Array.isArray(v);
+  const clonar = v => v === AUSENTE ? AUSENTE : (v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
+  function canon(v) {
+    if (v === AUSENTE) return '#AUSENTE';
+    if (Array.isArray(v)) {
+      const a = v.map(canon);
+      if (v.every(x => x == null || ['string', 'number', 'boolean'].includes(typeof x))) a.sort();
+      return '[' + a.join(',') + ']';
+    }
+    if (esObjeto(v)) return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}';
+    return JSON.stringify(v);
+  }
+  const iguales = (a, b) => canon(a) === canon(b);
+  function unir(base, local, remoto, ruta, conflictos, conservador) {
+    if (iguales(local, remoto)) return clonar(local);
+    if (!conservador && iguales(local, base)) return clonar(remoto);
+    if (!conservador && iguales(remoto, base)) return clonar(local);
+    if (conservador && local === AUSENTE) return clonar(remoto);
+    if (conservador && remoto === AUSENTE) return clonar(local);
+    const objetos = [base, local, remoto].filter(v => v !== AUSENTE);
+    if (objetos.length && objetos.every(esObjeto)) {
+      const salida = {};
+      const claves = new Set(objetos.flatMap(o => Object.keys(o)));
+      claves.forEach(k => {
+        const b = base !== AUSENTE && Object.prototype.hasOwnProperty.call(base, k) ? base[k] : AUSENTE;
+        const l = local !== AUSENTE && Object.prototype.hasOwnProperty.call(local, k) ? local[k] : AUSENTE;
+        const r = remoto !== AUSENTE && Object.prototype.hasOwnProperty.call(remoto, k) ? remoto[k] : AUSENTE;
+        const valor = unir(b, l, r, ruta.concat(k), conflictos, conservador);
+        if (valor !== AUSENTE) salida[k] = valor;
+      });
+      return salida;
+    }
+    conflictos.push({
+      ruta: ruta.slice(),
+      local: clonar(local),
+      remoto: clonar(remoto),
+      localAusente: local === AUSENTE,
+      remotoAusente: remoto === AUSENTE
+    });
+    return clonar(local);
+  }
+  function tresVias(base, local, remoto) {
+    const conflictos = [];
+    const estado = unir(base == null ? AUSENTE : base, local, remoto, [], conflictos, false);
+    return { estado, conflictos };
+  }
+  function conservadora(local, remoto) {
+    const conflictos = [];
+    const estado = unir(AUSENTE, local, remoto, [], conflictos, true);
+    return { estado, conflictos };
+  }
+  function asignar(objeto, ruta, valor, ausente) {
+    if (!ruta.length) return ausente ? {} : clonar(valor);
+    let cursor = objeto;
+    ruta.slice(0, -1).forEach(k => {
+      if (!esObjeto(cursor[k])) cursor[k] = {};
+      cursor = cursor[k];
+    });
+    const ultima = ruta[ruta.length - 1];
+    if (ausente) delete cursor[ultima]; else cursor[ultima] = clonar(valor);
+    return objeto;
+  }
+  const api = { iguales, clonar, tresVias, conservadora, asignar };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.ConflictEngine = api;
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
 <script>(function () {
   const B = JSON.parse(document.getElementById('d-banco').textContent);
   const C = JSON.parse(document.getElementById('d-config').textContent);
@@ -717,6 +786,19 @@ return out;
   const API_URL = 'https://swc-radiografia-api.afcaballero.workers.dev/api/diagnostico';
   const ACCESO = new URLSearchParams(window.location.search).get('acceso') || '';
   const KEY = 'swc_dx_v1_' + ACCESO;
+  const LOCK_KEY = KEY + '_lease_v1';
+  const TAB_ID = (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+  const SESSION_KEY = KEY + '_remote_session_v1';
+  const SESION_ID = (() => {
+    try {
+      let id = sessionStorage.getItem(SESSION_KEY);
+      if (!id) {
+        id = (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 's_' + Date.now().toString(36) + Math.random().toString(36).slice(2));
+        sessionStorage.setItem(SESSION_KEY, id);
+      }
+      return id;
+    } catch (_e) { return TAB_ID; }
+  })();
   const $ = s => document.querySelector(s);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const NIV = { 1: 'Por mejorar', 2: 'En desarrollo', 3: 'Bueno', 4: 'Fuerte' };
@@ -729,17 +811,25 @@ return out;
   let st = E.nuevo(), tab = 'empresa', grupo = 'general';
   let empresaAutorizada = '', revisionActual = 0, cargado = false;
   let pendiente = false, enviando = false, envioEnCola = false, bloqueado = false, conflictoRemoto = false;
+  let baseEstado = null, conflictosPendientes = null, importacionPendiente = null;
+  let pestanaSecundaria = false, sesionRemota = false, controlRemoto = null;
+  let temporizadorLease = null, temporizadorSesion = null, verificandoSesion = false, reintentosConciliacion = 0;
   let completoAnterior = false, lastPct = -1;
 	  const ESPERA_AVISO_MS = 60000;
 	  const ESPERA_SYNC_MS = 8000;
 	  const ESPERA_REINTENTO_MS = 30000;
 	  const TIMEOUT_API_MS = 15000;
+	  const LEASE_MS = 15000;
+	  const LEASE_PULSO_MS = 5000;
+	  const SESION_LEASE_MS = 5 * 60 * 1000;
+	  const SESION_VERIFICAR_MS = 15 * 1000;
+	  const SESION_RENOVAR_MS = 90 * 1000;
 	  let ultimoCambio = null, temporizadorAviso = null, temporizadorSync = null;
   function programarAvisoFlotante() {
     if (temporizadorAviso !== null) clearTimeout(temporizadorAviso);
     temporizadorAviso = null;
     actualizarAvisoSalida();
-    if (!cargado || !pendiente || bloqueado || conflictoRemoto || !ultimoCambio) return;
+    if (!cargado || !pendiente || bloqueado || conflictoRemoto || pestanaSecundaria || sesionRemota || !ultimoCambio) return;
     const restante = Math.max(0, ESPERA_AVISO_MS - (Date.now() - ultimoCambio));
     temporizadorAviso = setTimeout(() => {
       temporizadorAviso = null;
@@ -752,7 +842,7 @@ return out;
 	  }
 	  function programarSyncRemoto(espera = ESPERA_SYNC_MS) {
 	    cancelarSyncProgramado();
-	    if (!cargado || !pendiente || bloqueado || conflictoRemoto) return;
+	    if (!cargado || !pendiente || bloqueado || conflictoRemoto || pestanaSecundaria || sesionRemota) return;
 	    temporizadorSync = setTimeout(() => {
 	      temporizadorSync = null;
 	      void sync();
@@ -768,6 +858,7 @@ return out;
         revision: revisionActual,
         pendiente,
         estado: st,
+        baseEstado,
         actualizadoEn: new Date().toISOString()
       }));
     } catch (_e) {
@@ -776,7 +867,7 @@ return out;
     actualizarAvisoSalida();
   }
   function actualizarAvisoSalida() {
-    const hayPendientes = !!(cargado && empresaAutorizada && pendiente && !bloqueado && !conflictoRemoto);
+    const hayPendientes = !!(cargado && empresaAutorizada && pendiente && !bloqueado && !conflictoRemoto && !pestanaSecundaria && !sesionRemota);
     const chip = document.getElementById('saveChip');
     if (chip) {
       chip.disabled = !(hayPendientes && !enviando);
@@ -792,6 +883,154 @@ return out;
       const d = JSON.parse(localStorage.getItem(KEY));
       return d && typeof d === 'object' ? d : null;
     } catch (_e) { return null; }
+  }
+  function sesionActiva(sesion) {
+    return !!(sesion && typeof sesion.id === 'string' && Number.isFinite(sesion.ts) && Date.now() - sesion.ts < SESION_LEASE_MS);
+  }
+  function marcarSesion() {
+    st._session = { id: SESION_ID, ts: Date.now() };
+  }
+  function aplicarLecturaSesionRemota() {
+    if (!cargado || !sesionRemota) return;
+    document.querySelectorAll('#app input, #app select, #app textarea').forEach(e => { e.disabled = true; });
+    estadoSWC(pendiente
+      ? 'La edición continuó en otro equipo. Esta copia queda en lectura y conserva cambios locales pendientes; descárguelos antes de transferir nuevamente el control.'
+      : 'Este diagnóstico está siendo editado en otro equipo. Esta copia queda en lectura para impedir sobrescrituras.', true);
+    if (pendiente) mostrarBotonBackupLocal();
+    mostrarBotonTomarControl();
+  }
+  function activarLecturaSesionRemota(remoto, revision, conservarLocal = false) {
+    controlRemoto = { estado: ConflictEngine.clonar(remoto), revision };
+    sesionRemota = true;
+    conflictoRemoto = false;
+    cancelarSyncProgramado();
+    if (!conservarLocal || !pendiente) {
+      st = Object.assign(E.nuevo(), remoto);
+      revisionActual = revision;
+      baseEstado = ConflictEngine.clonar(remoto);
+      pendiente = false;
+      guardarLocal();
+    }
+    render(true);
+    aplicarLecturaSesionRemota();
+  }
+  function iniciarPulsoSesionRemota() {
+    temporizadorSesion = setInterval(async () => {
+      if (!cargado || bloqueado || conflictoRemoto || pestanaSecundaria || sesionRemota || enviando || pendiente || verificandoSesion) return;
+      verificandoSesion = true;
+      try {
+        const consulta = await api('consultar');
+        const { remoto, revision } = leerEstadoRegistrado(consulta);
+        if (sesionActiva(remoto._session) && remoto._session.id !== SESION_ID) {
+          activarLecturaSesionRemota(remoto, revision, pendiente);
+          return;
+        }
+        if (Date.now() - Number(st._session && st._session.ts || 0) >= SESION_RENOVAR_MS) {
+          marcarSesion();
+          pendiente = true;
+          guardarLocal();
+          programarSyncRemoto(0);
+        }
+      } catch (_e) {
+        // Una verificación fallida no modifica el formulario ni descarta datos locales.
+      } finally {
+        verificandoSesion = false;
+      }
+    }, SESION_VERIFICAR_MS);
+    window.addEventListener('pagehide', () => { if (temporizadorSesion !== null) clearInterval(temporizadorSesion); });
+  }
+  function leerLease() {
+    try {
+      const d = JSON.parse(localStorage.getItem(LOCK_KEY));
+      return d && typeof d.id === 'string' && Number.isFinite(d.ts) ? d : null;
+    } catch (_e) { return null; }
+  }
+  function escribirLease() {
+    try { localStorage.setItem(LOCK_KEY, JSON.stringify({ id: TAB_ID, ts: Date.now() })); } catch (_e) {}
+  }
+  function mostrarBotonTomarControl() {
+    const cont = document.getElementById('swcEstado');
+    if (cont && !document.getElementById('swcTomarControl')) {
+      const btn = document.createElement('button');
+      btn.id = 'swcTomarControl';
+      btn.type = 'button';
+      btn.className = 'btn';
+      btn.textContent = 'Continuar acá';
+      cont.appendChild(btn);
+    }
+  }
+  function aplicarLecturaOtraPestana() {
+    if (!cargado || !pestanaSecundaria) return;
+    document.querySelectorAll('#app input, #app select, #app textarea').forEach(e => { e.disabled = true; });
+    estadoSWC('Este diagnóstico ya está abierto en otra pestaña de este navegador. Esta copia queda en lectura para evitar versiones simultáneas.', true);
+    mostrarBotonTomarControl();
+  }
+  function revisarLease() {
+    if (!ACCESO || !/^[A-Za-z0-9_-]{20,160}$/.test(ACCESO)) return;
+    const ahora = Date.now(), lease = leerLease();
+    const otraActiva = lease && lease.id !== TAB_ID && ahora - lease.ts < LEASE_MS;
+    if (otraActiva) {
+      if (!pestanaSecundaria) {
+        pestanaSecundaria = true;
+        cancelarSyncProgramado();
+        if (cargado) { render(true); aplicarLecturaOtraPestana(); }
+      }
+      return;
+    }
+    escribirLease();
+    if (pestanaSecundaria) {
+      pestanaSecundaria = false;
+      if (cargado) {
+        render(true);
+        estadoSWC(pendiente ? 'Control recuperado en esta pestaña. Los cambios pendientes se conciliarán con SharePoint.' : 'Control recuperado en esta pestaña.');
+        if (pendiente) programarSyncRemoto(0);
+      }
+    }
+  }
+  function tomarControlAqui() {
+    escribirLease();
+    pestanaSecundaria = false;
+    const local = leerLocal();
+    if (local && local.empresa === empresaAutorizada && local.estado) {
+      st = Object.assign(E.nuevo(), local.estado);
+      revisionActual = Number(local.revision || revisionActual || 0);
+      pendiente = !!local.pendiente;
+      baseEstado = local.baseEstado && typeof local.baseEstado === 'object' ? ConflictEngine.clonar(local.baseEstado) : baseEstado;
+    }
+    protegerEmpresa();
+    render(true);
+    estadoSWC(pendiente ? 'Esta pestaña tomó el control. Conciliando cambios pendientes con SharePoint…' : 'Esta pestaña tomó el control del diagnóstico.');
+    if (pendiente) programarSyncRemoto(0);
+  }
+  async function continuarAcaRemoto() {
+    if (!sesionRemota) { tomarControlAqui(); return; }
+    estadoSWC('Solicitando el control de edición en este equipo…');
+    try {
+      const consulta = await api('consultar');
+      const { remoto, revision } = leerEstadoRegistrado(consulta);
+      const copiaLocal = ConflictEngine.clonar(st);
+      sesionRemota = false;
+      controlRemoto = null;
+      conflictoRemoto = false;
+      bloqueado = false;
+      const resultado = conciliarEstados(copiaLocal, remoto, revision, { tomarControl: true });
+      if (resultado === 'reintentar') programarSyncRemoto(0);
+    } catch (_e) {
+      sesionRemota = true;
+      estadoSWC('No se pudo transferir el control. Esta copia continúa en modo lectura y ninguna versión fue sobrescrita.', true);
+      mostrarBotonTomarControl();
+    }
+  }
+  function iniciarControlPestanas() {
+    revisarLease();
+    temporizadorLease = setInterval(revisarLease, LEASE_PULSO_MS);
+    window.addEventListener('storage', e => { if (e.key === LOCK_KEY) revisarLease(); });
+    window.addEventListener('pagehide', () => {
+      if (temporizadorLease !== null) clearInterval(temporizadorLease);
+      if (temporizadorSesion !== null) clearInterval(temporizadorSesion);
+      const lease = leerLease();
+      if (lease && lease.id === TAB_ID) try { localStorage.removeItem(LOCK_KEY); } catch (_e) {}
+    });
   }
   function estadoSWC(m, esError = false) {
     const e = document.getElementById('swcEstado');
@@ -851,16 +1090,183 @@ return out;
     }
     return data;
   }
+	function leerEstadoRegistrado(res) {
+	  if (!res || !res.existe || !res.estado) throw new Error('No existe un respaldo remoto para conciliar.');
+	  const registrado = res.estado;
+	  const remoto = typeof registrado.estadoJson === 'string' ? JSON.parse(registrado.estadoJson) : registrado.estadoJson;
+	  if (!remoto || typeof remoto !== 'object' || Array.isArray(remoto)) throw new Error('El respaldo remoto no tiene el formato esperado.');
+	  if (remoto.empresa !== empresaAutorizada) throw new Error('El respaldo remoto pertenece a otra empresa.');
+	  if (st.id && remoto.id && st.id !== remoto.id) throw new Error('El respaldo remoto pertenece a otro expediente.');
+	  return { remoto, revision: Number(registrado.revision || 0) };
+	}
+	function etiquetaRuta(ruta) {
+	  const rama = ruta[0], id = ruta[1];
+	  if (rama === 'inst' && id === 'equity') return 'Selección del módulo Equity';
+	  if (rama === 'f') {
+	    for (const q of B.preguntas) {
+	      const c = (q.campos || []).find(x => x.k === id);
+	      if (c) return q.texto + (c.fila ? ' · ' + c.fila : c.t ? ' · ' + c.t : '');
+	    }
+	  }
+	  if (rama === 'g') {
+	    const base = String(id || '').split('|')[0], q = B.preguntas.find(x => x.id === base || x.id + 'x' === base || x.id + 'm' === base);
+	    if (q) return q.texto;
+	  }
+	  if (['r', 'm', 'tx', 'fl', 'us'].includes(rama)) {
+	    const q = B.preguntas.find(x => x.id === id);
+	    if (q) return q.texto;
+	  }
+	  return ruta.join(' › ');
+	}
+	function textoValorConflicto(conflicto, lado) {
+	  const ausente = conflicto[lado + 'Ausente'], valor = conflicto[lado];
+	  if (ausente || valor == null || valor === '') return 'Sin respuesta';
+	  if (conflicto.ruta[0] === 'f' && typeof valor === 'number') return '$ ' + Math.round(valor).toLocaleString('es-CO');
+	  if (typeof valor === 'boolean') return valor ? 'Sí' : 'No';
+	  if (typeof valor === 'object') {
+	    const t = JSON.stringify(valor);
+	    return t.length > 180 ? t.slice(0, 177) + '…' : t;
+	  }
+	  return String(valor);
+	}
+	function mostrarBotonResolver() {
+	  const cont = document.getElementById('swcEstado');
+	  if (cont && conflictosPendientes && !document.getElementById('swcResolver')) {
+	    const btn = document.createElement('button');
+	    btn.id = 'swcResolver';
+	    btn.type = 'button';
+	    btn.className = 'btn p';
+	    btn.textContent = 'Resolver ' + conflictosPendientes.conflictos.length + (conflictosPendientes.conflictos.length === 1 ? ' diferencia' : ' diferencias');
+	    cont.appendChild(btn);
+	  }
+	}
+	function prepararConflictos(local, remoto, revisionRemota, resultado) {
+	  conflictosPendientes = {
+	    local: ConflictEngine.clonar(local),
+	    remoto: ConflictEngine.clonar(remoto),
+	    revision: revisionRemota,
+	    estado: ConflictEngine.clonar(resultado.estado),
+	    conflictos: resultado.conflictos
+	  };
+	  st = Object.assign(E.nuevo(), local);
+	  protegerEmpresa();
+	  activarModoLocalPorConflicto('SharePoint y este dispositivo cambiaron ' + resultado.conflictos.length + (resultado.conflictos.length === 1 ? ' campo de forma diferente. Revise esa diferencia antes de continuar; ninguna versión se sobrescribió.' : ' campos de forma diferente. Revise esas diferencias antes de continuar; ninguna versión se sobrescribió.'), true);
+	  mostrarBotonResolver();
+	}
+	function abrirResolverConflictos() {
+	  if (!conflictosPendientes) return;
+	  const filas = conflictosPendientes.conflictos.map((c, i) =>
+	    '<fieldset class="card" style="margin:12px 0;padding:14px"><legend><b>' + esc(etiquetaRuta(c.ruta)) + '</b></legend>' +
+	    '<label class="tog" style="display:flex;margin:8px 0"><input type="radio" name="cf_' + i + '" value="local" checked> <span><b>Este dispositivo</b><br><span class="small muted">' + esc(textoValorConflicto(c, 'local')) + '</span></span></label>' +
+	    '<label class="tog" style="display:flex;margin:8px 0"><input type="radio" name="cf_' + i + '" value="remoto"> <span><b>SharePoint</b><br><span class="small muted">' + esc(textoValorConflicto(c, 'remoto')) + '</span></span></label></fieldset>'
+	  ).join('');
+	  opener = document.getElementById('swcResolver');
+	  $('#mb').innerHTML = '<h2 id="mt">Resolver cambios simultáneos</h2><p>Solo estos campos fueron modificados de manera diferente. Elija el valor correcto para cada uno; las demás respuestas ya se conciliaron automáticamente.</p>' + filas + '<div class="row" style="margin-top:16px"><button type="button" class="btn p" id="aplicarConciliacion">Aplicar y respaldar</button><button type="button" class="btn" id="cancelarConciliacion">Cancelar</button></div>';
+	  $('#modal').hidden = false;
+	  document.body.style.overflow = 'hidden';
+	  $('#mclose').focus();
+	}
+	function aplicarResolverConflictos() {
+	  if (!conflictosPendientes) return;
+	  const datos = conflictosPendientes;
+	  const resuelto = ConflictEngine.clonar(datos.estado);
+	  datos.conflictos.forEach((c, i) => {
+	    const elegido = document.querySelector('input[name="cf_' + i + '"]:checked');
+	    if (elegido && elegido.value === 'remoto') ConflictEngine.asignar(resuelto, c.ruta, c.remoto, c.remotoAusente);
+	  });
+	  st = Object.assign(E.nuevo(), resuelto);
+	  marcarSesion();
+	  revisionActual = datos.revision;
+	  baseEstado = ConflictEngine.clonar(datos.remoto);
+	  conflictosPendientes = null;
+	  conflictoRemoto = false;
+	  bloqueado = false;
+	  pendiente = true;
+	  reintentosConciliacion = 0;
+	  protegerEmpresa();
+	  marcarSesion();
+	  guardarLocal();
+	  closeInfo();
+	  render(true);
+	  estadoSWC('Diferencias resueltas. Guardando la versión conciliada en SharePoint…');
+	  programarSyncRemoto(0);
+	}
+	function sinSesion(estado) {
+	  const limpio = ConflictEngine.clonar(estado || {});
+	  delete limpio._session;
+	  return limpio;
+	}
+	function conciliarEstados(copiaLocal, remoto, revision, opciones = {}) {
+	  const otraSesion = sesionActiva(remoto._session) && remoto._session.id !== SESION_ID;
+	  if (otraSesion && !opciones.tomarControl) {
+	    activarLecturaSesionRemota(remoto, revision, true);
+	    return 'sesion_remota';
+	  }
+	  const localLimpio = sinSesion(copiaLocal), remotoLimpio = sinSesion(remoto);
+	  const baseLimpia = baseEstado && typeof baseEstado === 'object' ? sinSesion(baseEstado) : null;
+	  const resultado = baseLimpia
+	    ? ConflictEngine.tresVias(baseLimpia, localLimpio, remotoLimpio)
+	    : ConflictEngine.conservadora(localLimpio, remotoLimpio);
+	  if (resultado.conflictos.length) {
+	    prepararConflictos(copiaLocal, remoto, revision, resultado);
+	    return 'conflicto';
+	  }
+	  const yaGuardado = !opciones.tomarControl && remoto._session && remoto._session.id === SESION_ID && ConflictEngine.iguales(resultado.estado, remotoLimpio);
+	  if (yaGuardado) {
+	    st = Object.assign(E.nuevo(), remoto);
+	    revisionActual = revision;
+	    baseEstado = ConflictEngine.clonar(remoto);
+	    pendiente = false;
+	    conflictoRemoto = false;
+	    bloqueado = false;
+	    reintentosConciliacion = 0;
+	    guardarLocal();
+	    render(true);
+	    estadoSWC('Respaldo confirmado en SharePoint · revisión ' + revisionActual);
+	    return 'confirmado';
+	  }
+	  resultado.estado._session = { id: SESION_ID, ts: Date.now() };
+	  st = Object.assign(E.nuevo(), resultado.estado);
+	  revisionActual = revision;
+	  baseEstado = ConflictEngine.clonar(remoto);
+	  sesionRemota = false;
+	  controlRemoto = null;
+	  conflictoRemoto = false;
+	  bloqueado = false;
+	  protegerEmpresa();
+	  pendiente = !!opciones.tomarControl || !ConflictEngine.iguales(st, remoto);
+	  guardarLocal();
+	  render(true);
+	  if (!pendiente) {
+	    reintentosConciliacion = 0;
+	    estadoSWC('Respaldo confirmado en SharePoint · revisión ' + revisionActual);
+	    return 'confirmado';
+	  }
+	  reintentosConciliacion += 1;
+	  if (reintentosConciliacion > 3) {
+	    activarModoLocalPorConflicto('SharePoint continúa cambiando desde otra sesión. La copia local está a salvo; cierre las otras sesiones y vuelva a intentar.', false);
+	    return 'conflicto';
+	  }
+	  estadoSWC('Se conciliaron cambios de otra sesión. Actualizando el respaldo combinado…');
+	  return 'reintentar';
+	}
+	async function conciliarConSharePoint(copiaLocal) {
+	  const consulta = await api('consultar');
+	  const { remoto, revision } = leerEstadoRegistrado(consulta);
+	  return conciliarEstados(copiaLocal, remoto, revision);
+	}
 	  // Cada cambio se guarda inmediatamente en este navegador y se agrupa para
 	  // respaldarlo en SharePoint pocos segundos después, sin una petición por tecla.
   async function sync() {
-    if (!cargado || !pendiente || bloqueado || conflictoRemoto) return;
+    if (!cargado || !pendiente || bloqueado || conflictoRemoto || pestanaSecundaria || sesionRemota) return;
     if (enviando) { envioEnCola = true; return; }
 	    cancelarSyncProgramado();
     enviando = true;
-	    let fallo = false;
+	    let fallo = false, reintentar = false;
     protegerEmpresa();
-    const copia = JSON.stringify(st);
+    marcarSesion();
+    const copiaEstado = ConflictEngine.clonar(st);
+    const copia = JSON.stringify(copiaEstado);
     const revisionBase = revisionActual;
     estadoSWC('Guardando el avance en SharePoint…');
     try {
@@ -872,15 +1278,24 @@ return out;
       });
       if (Number(result.revision) !== revisionBase + 1) throw new Error('Revision no confirmada');
       revisionActual = Number(result.revision);
+      baseEstado = ConflictEngine.clonar(copiaEstado);
+      reintentosConciliacion = 0;
       pendiente = (JSON.stringify(st) !== copia);
       guardarLocal();
       estadoSWC(pendiente ? 'Respaldo actualizado. Hay cambios nuevos pendientes.' : 'Respaldo actualizado en SharePoint · revisión ' + revisionActual);
     } catch (err) {
-	      fallo = true;
       pendiente = true;
       if (err.codigo === 409) {
-        activarModoLocalPorConflicto('Existe una versión más reciente en SharePoint. Puede seguir trabajando en esta copia local; el respaldo remoto queda en pausa y ninguna versión se sobrescribirá. Descargue la copia local antes de cerrar.');
+        try {
+          const resultado = await conciliarConSharePoint(copiaEstado);
+          reintentar = resultado === 'reintentar';
+          fallo = resultado === 'conflicto';
+        } catch (_conciliacionError) {
+          fallo = true;
+          activarModoLocalPorConflicto('Existe una versión más reciente en SharePoint y no fue posible compararla ahora. La copia local está a salvo; vuelva a intentarlo cuando haya conexión.', false);
+        }
       } else {
+        fallo = true;
         estadoSWC('No se pudo respaldar en SharePoint. Las respuestas permanecen guardadas en este navegador.', true);
       }
       guardarLocal();
@@ -892,15 +1307,18 @@ return out;
         temporizadorAviso = null;
         actualizarAvisoSalida();
       }
-      if (envioEnCola && !bloqueado) {
+      if (reintentar && pendiente && !bloqueado && !conflictoRemoto && !pestanaSecundaria && !sesionRemota) {
+        programarSyncRemoto(0);
+      } else if (envioEnCola && !bloqueado && !conflictoRemoto && !pestanaSecundaria && !sesionRemota) {
         envioEnCola = false;
         if (pendiente) void sync();
-	      } else if (fallo && pendiente && !bloqueado) programarSyncRemoto(ESPERA_REINTENTO_MS);
+	      } else if (fallo && pendiente && !bloqueado && !conflictoRemoto && !pestanaSecundaria && !sesionRemota) programarSyncRemoto(ESPERA_REINTENTO_MS);
     }
   }
   const save = () => {
-    if (!cargado || bloqueado) return;
+    if (!cargado || bloqueado || pestanaSecundaria || sesionRemota) return;
     protegerEmpresa();
+    marcarSesion();
     pendiente = true;
     ultimoCambio = Date.now();
     guardarLocal();
@@ -926,15 +1344,17 @@ return out;
   function bloquearEdicion() {
     document.querySelectorAll('#app input, #app select, #app textarea').forEach(e => e.disabled = true);
     mostrarBotonBackupLocal();
+    mostrarBotonResolver();
   }
-  function activarModoLocalPorConflicto(msg) {
-    bloqueado = false;
+  function activarModoLocalPorConflicto(msg, pausarEdicion = false) {
+    bloqueado = !!pausarEdicion;
     conflictoRemoto = true;
     pendiente = true;
     cancelarSyncProgramado();
     estadoSWC(msg, true);
     guardarLocal();
     mostrarBotonBackupLocal();
+    if (pausarEdicion) bloquearEdicion();
   }
   function pantallaBloqueada(msg) {
     conflictoRemoto = false;
@@ -967,10 +1387,31 @@ return out;
       const revisionRemota = Number(registrado.revision || 0);
       revisionActual = revisionRemota;
       const local = leerLocal();
+      const sesionRegistrada = remoto._session;
+      const otraSesionActiva = sesionActiva(sesionRegistrada) && sesionRegistrada.id !== SESION_ID;
       const deudaRemotaOmitida = !remoto.inst || remoto.inst.deuda !== true;
+      if (otraSesionActiva) {
+        const conservarLocal = !!(local && local.empresa === empresaAutorizada && local.pendiente && local.estado);
+        if (conservarLocal) {
+          st = Object.assign(E.nuevo(), local.estado);
+          revisionActual = Number(local.revision || 0);
+          baseEstado = local.baseEstado && typeof local.baseEstado === 'object' ? ConflictEngine.clonar(local.baseEstado) : null;
+          pendiente = true;
+        } else {
+          st = Object.assign(E.nuevo(), remoto);
+          baseEstado = ConflictEngine.clonar(remoto);
+          pendiente = false;
+        }
+        cargado = true;
+        protegerEmpresa();
+        completoAnterior = E.prog(st).pct === 100;
+        activarLecturaSesionRemota(remoto, revisionRemota, conservarLocal);
+        return;
+      }
       // Nunca permitir que un borrador de otra empresa cargue en esta pagina.
       if (local && local.empresa === empresaAutorizada && local.pendiente) {
         if (Number(local.revision) !== revisionRemota) {
+          baseEstado = local.baseEstado && typeof local.baseEstado === 'object' ? ConflictEngine.clonar(local.baseEstado) : null;
           revisionActual = Number(local.revision || 0);
           st = Object.assign(E.nuevo(), local.estado);
           pendiente = true;
@@ -980,17 +1421,25 @@ return out;
           cargado = true;
           protegerEmpresa();
           render();
-          activarModoLocalPorConflicto('SharePoint tiene una versión más reciente, pero recuperamos las respuestas de este navegador. Puede seguir trabajando en esta copia local; el respaldo remoto queda en pausa y ninguna versión se sobrescribirá. Descargue la copia local antes de cerrar.');
+          const conciliado = conciliarEstados(ConflictEngine.clonar(st), remoto, revisionRemota);
+          if (conciliado === 'reintentar') programarSyncRemoto(0);
+          if (pestanaSecundaria) aplicarLecturaOtraPestana();
           return;
         }
+        baseEstado = local.baseEstado && typeof local.baseEstado === 'object' ? ConflictEngine.clonar(local.baseEstado) : ConflictEngine.clonar(remoto);
         remoto = local.estado;
         pendiente = true;
       } else {
+        baseEstado = ConflictEngine.clonar(remoto);
         pendiente = false;
       }
       st = Object.assign(E.nuevo(), remoto);
       protegerEmpresa();
       if (deudaRemotaOmitida) pendiente = true;
+      if (!sesionActiva(sesionRegistrada) || sesionRegistrada.id !== SESION_ID) {
+        marcarSesion();
+        pendiente = true;
+      }
       if (pendiente) {
         const t = local && Date.parse(local.actualizadoEn);
         ultimoCambio = Number.isFinite(t) && t > 0 ? Math.min(t, Date.now()) : Date.now();
@@ -999,10 +1448,11 @@ return out;
       cargado = true;
       guardarLocal();
       render();
-      if (pendiente) programarAvisoFlotante();
+      if (pendiente) { programarAvisoFlotante(); programarSyncRemoto(0); }
       estadoSWC(pendiente
 	        ? 'Borrador recuperado de este navegador. Se respaldará automáticamente en SharePoint.'
         : 'Datos de ' + empresaAutorizada + ' cargados desde SharePoint · revisión ' + revisionActual);
+      if (pestanaSecundaria) aplicarLecturaOtraPestana();
     } catch (error) {
       pantallaBloqueada('No fue posible verificar el enlace o recuperar los datos desde SharePoint. Intente recargar cuando tenga conexión.');
     }
@@ -1330,6 +1780,33 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
   let opener = null;
   function openInfo(key, btn) { opener = btn; $('#mb').innerHTML = infoHTML(key); $('#modal').hidden = false; document.body.style.overflow = 'hidden'; $('#mclose').focus(); }
   function closeInfo() { if ($('#modal').hidden) return; $('#modal').hidden = true; document.body.style.overflow = ''; if (opener && document.contains(opener)) opener.focus(); opener = null; }
+  function revisarImportacion(estado, btn) {
+    if (!estado || estado.empresa !== empresaAutorizada) throw new Error('Empresa distinta');
+    if (st.id && estado.id && st.id !== estado.id) throw new Error('Expediente distinto');
+    const limpio = ConflictEngine.clonar(estado);
+    delete limpio._session;
+    importacionPendiente = Object.assign(E.nuevo(), limpio);
+    const avance = E.prog(importacionPendiente), actual = E.prog(st);
+    opener = btn;
+    $('#mb').innerHTML = '<h2 id="mt">Confirmar carga del respaldo</h2><p>El archivo contiene <b>' + avance.hechas + ' de ' + avance.total + ' respuestas</b>. La vista actual contiene ' + actual.hechas + ' de ' + actual.total + '.</p><p>Al confirmar, el sistema conciliará el archivo con la última revisión de SharePoint. Si un mismo campo tiene dos valores diferentes, se los mostrará antes de guardar.</p><div class="row" style="margin-top:18px"><button type="button" class="btn p" id="confirmarImportacion">Conciliar y cargar</button><button type="button" class="btn" id="cancelarImportacion">Cancelar</button></div>';
+    $('#modal').hidden = false;
+    document.body.style.overflow = 'hidden';
+    $('#mclose').focus();
+  }
+  function confirmarImportacion() {
+    if (!importacionPendiente) return;
+    st = Object.assign(E.nuevo(), importacionPendiente);
+    importacionPendiente = null;
+    marcarSesion();
+    pendiente = true;
+    ultimoCambio = Date.now();
+    protegerEmpresa();
+    guardarLocal();
+    closeInfo();
+    render();
+    estadoSWC('Respaldo cargado en este dispositivo. Conciliando con SharePoint…');
+    programarSyncRemoto(0);
+  }
   document.addEventListener('keydown', e => {
     const m = $('#modal'); if (m.hidden) return;
     if (e.key === 'Escape') { closeInfo(); return; }
@@ -1363,9 +1840,10 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     const tabla = respuestasHTML(E.filas(st), false);
     const esFinal = r.prog.total > 0 && r.prog.hechas === r.prog.total;
     const selloBorrador = esFinal ? '' : '<div class="card"><b>Borrador sin finalizar</b><p>Quedan ' + (r.prog.total-r.prog.hechas) + ' respuestas obligatorias. Esta copia no es un resultado final.</p></div>';
-    const datos = JSON.stringify({ app: 'dx-light', version: B.version, fecha: new Date().toISOString(), estado: st }).replace(/</g, '\\u003c');
+    const estadoExportable = ConflictEngine.clonar(st); delete estadoExportable._session;
+    const datos = JSON.stringify({ app: 'dx-light', version: B.version, fecha: new Date().toISOString(), estado: estadoExportable }).replace(/</g, '\\u003c');
     const css = [...document.querySelectorAll('style')].map(s => s.textContent).filter(t => t.includes('--brand')).join('\n');
-    return '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"><title>Radiografía · ' + esc(st.empresa || 'Empresa') + '</title><style>' + css + '</style></head><body><div class="wrap"><header class="top"><div class="logo">R</div><div><h1>Radiografía de financiabilidad</h1><div class="sub">' + esc(st.empresa || 'Empresa') + ' · ' + fecha + '</div></div></header><main>' + selloBorrador + radioHTML(r, false) + (esFinal && r.general.estado === 'clasificado' ? detalleReporte(r) : '') + tabla + '</main></div><script type="application/json" id="respuestas-dx">' + datos + '<\/script></body></html>';
+    return '<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap"><title>Radiografía · ' + esc(st.empresa || 'Empresa') + '</title><style>' + css + '</style></head><body><div class="wrap"><header class="top"><div class="logo">R</div><div><h1>Radiografía de financiabilidad</h1><div class="sub">' + esc(st.empresa || 'Empresa') + ' · ' + fecha + '</div></div></header><main>' + selloBorrador + radioHTML(r, false) + (esFinal && r.general.estado === 'clasificado' ? detalleReporte(r) : '') + tabla + '</main></div><script type="application/json" id="respuestas-dx">' + datos + '<\/script></bo' + 'dy></html>';
   }
   async function descargar(nombre, html) {
     try { if (window.claude && claude.use) { const d = await claude.use('downloads'); if (d) { await d.save({ filename: nombre, data: html }); return; } } } catch (e) { if (e && e.code === 'declined') return; }
@@ -1412,22 +1890,34 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === tab));
     $('#app').innerHTML = tab === 'empresa' ? viewEmpresa() : tab === 'radio' ? viewRadio() : viewComo();
 	    renderProg();
+	    if (pestanaSecundaria) aplicarLecturaOtraPestana();
+	    if (sesionRemota) aplicarLecturaSesionRemota();
 	    if (mantenerScroll) requestAnimationFrame(() => window.scrollTo(0, posicion));
 	    else window.scrollTo(0, 0);
   }
   document.addEventListener('click', e => {
+    if (e.target.closest('#swcTomarControl')) {
+      if (sesionRemota) void continuarAcaRemoto(); else tomarControlAqui();
+      return;
+    }
+    if (e.target.closest('#swcResolver')) { abrirResolverConflictos(); return; }
     if (e.target.closest('#swcGuardarFlotante') || e.target.closest('#saveChip')) {
-      if (cargado && pendiente && !bloqueado && !conflictoRemoto && !enviando) void sync();
+      if (cargado && pendiente && !bloqueado && !conflictoRemoto && !pestanaSecundaria && !sesionRemota && !enviando) void sync();
       return;
     }
     if (e.target.closest('#swcBackup') && empresaAutorizada) {
       descargar('Radiografia_Borrador_' + empresaAutorizada.replace(/[^\w]+/g, '_') + '.html', reporte());
       return;
     }
+    if (e.target.closest('#aplicarConciliacion')) { aplicarResolverConflictos(); return; }
+    if (e.target.closest('#cancelarConciliacion')) { closeInfo(); return; }
+    if (e.target.closest('#confirmarImportacion')) { confirmarImportacion(); return; }
+    if (e.target.closest('#cancelarImportacion')) { importacionPendiente = null; closeInfo(); return; }
+    if (e.target.closest('#mclose') || e.target.id === 'modal') { importacionPendiente = null; closeInfo(); return; }
     if (!cargado || bloqueado) return;
+	  if ((pestanaSecundaria || sesionRemota) && !e.target.closest('[data-tab],[data-go],.step,#rep,.rep,[data-info]')) return;
 	    const preconfirm = e.target.closest('[data-preconfirm]');
 	    if (preconfirm) { confirmarPrecarga(preconfirm.dataset.preconfirm); return; }
-    if (e.target.closest('#mclose') || e.target.id === 'modal') { closeInfo(); return; }
     const inf = e.target.closest('[data-info]'); if (inf) { openInfo(inf.dataset.info, inf); return; }
     if (e.target.closest('#clvgo')) { cargarClave(); return; }
     const fd = e.target.closest('[data-fdel]'); if (fd) {
@@ -1452,7 +1942,7 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     if (tab !== tabAntes || grupo !== grupoAntes) void sync();
   });
   document.addEventListener('change', e => {
-    if (!cargado || bloqueado) return;
+    if (!cargado || bloqueado || pestanaSecundaria || sesionRemota) return;
     const t = e.target;
     if (t.dataset.q) {
       st.r[t.dataset.q] = Object.assign(st.r[t.dataset.q] || {}, { o: t.value });
@@ -1474,12 +1964,12 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     }
     else if (t.classList.contains('unit')) { st.us = st.us || {}; st.us[t.dataset.uq] = +t.value; document.querySelectorAll('[data-f]').forEach(i => { document.getElementById('h_' + i.dataset.f).textContent = hint(i.dataset.f); }); }
     else if (t.dataset.fup) { subirArchivos(t); return; }
-    else if (t.id === 'load') { const f = t.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { try { const m = /<script type="application\/json" id="respuestas-dx">([\s\S]*?)<\/script>/.exec(rd.result); const d = JSON.parse(m[1]); if (d.app !== 'dx-light') throw 0; if (!d.estado || d.estado.empresa !== empresaAutorizada) throw 0; st = Object.assign(E.nuevo(), d.estado); protegerEmpresa(); save(); render(); toast('Respuestas cargadas'); } catch (x) { toast('No se pudo leer ese archivo'); } }; rd.readAsText(f); return; }
+    else if (t.id === 'load') { const f = t.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => { try { const m = /<script type="application\/json" id="respuestas-dx">([\s\S]*?)<\/script>/.exec(rd.result); if (!m) throw 0; const d = JSON.parse(m[1]); if (d.app !== 'dx-light') throw 0; if (!d.estado || d.estado.empresa !== empresaAutorizada) throw 0; if (st.id && d.estado.id && st.id !== d.estado.id) throw 0; const importado = ConflictEngine.clonar(d.estado); delete importado._session; revisarImportacion(importado, t); } catch (x) { toast('No se pudo leer ese archivo'); } finally { t.value = ''; } }; rd.readAsText(f); return; }
     else return;
     save(); renderProg();
   });
   document.addEventListener('input', e => {
-    if (!cargado || bloqueado) return;
+    if (!cargado || bloqueado || pestanaSecundaria || sesionRemota) return;
     const t = e.target;
     if (t.id === 'emp') { t.value = empresaAutorizada; return; }
     else if (t.dataset.c) { st.r[t.dataset.c] = Object.assign(st.r[t.dataset.c] || {}, { c: t.value }); }
@@ -1509,6 +1999,8 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
       event.returnValue = '';
     }
   });
+  iniciarControlPestanas();
+  iniciarPulsoSesionRemota();
   void iniciar();
 })();
 </script>
@@ -1520,13 +2012,13 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
   const est = $('#swcEstado'), chip = $('#saveChip'), app = $('#app'), pg = $('#pg'), bar = $('#barra');
   const wel = $('#welcome'), wName = $('#wName'), wMsg = $('#wMsg'), wNote = $('#wNote'), wPct = $('#wPct');
   const KEY = 'swc_dx_v1_' + (new URLSearchParams(location.search).get('acceso') || '');
-  const LBL = { loading: 'Verificando enlace', local: 'Guardado en este dispositivo', sync: 'Sincronizando respaldo…', ok: 'Respaldo confirmado', error: 'Respaldo pendiente · sin conexión', conflict: 'Versión más reciente en SharePoint', blocked: 'Acceso no disponible' };
+  const LBL = { loading: 'Verificando enlace', local: 'Guardado en este dispositivo', sync: 'Sincronizando respaldo…', ok: 'Respaldo confirmado', error: 'Respaldo pendiente · sin conexión', conflict: 'Otra sesión en edición', blocked: 'Acceso no disponible' };
   let state = 'loading', empresa = '', recuperado = false;
 
   function classify(t) {
     if (/Comprobando/.test(t)) return 'loading';
-    if (/Guardando el avance/.test(t)) return 'sync';
-    if (/más reciente/.test(t)) return 'conflict';
+    if (/Guardando el avance|Conciliando|conciliaron cambios|Diferencias resueltas|Solicitando el control/.test(t)) return 'sync';
+    if (/más reciente|otra pestaña|modo lectura|cambiaron \d+ campo|continúa cambiando|otra sesión/.test(t)) return 'conflict';
     if (/No se pudo respaldar|No se pudo guardar localmente/.test(t)) return 'error';
     if (/Borrador recuperado/.test(t)) { recuperado = true; return 'local'; }
     if (/cambios nuevos pendientes/.test(t)) return 'local';
