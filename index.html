@@ -728,7 +728,7 @@ return out;
 
   let st = E.nuevo(), tab = 'empresa', grupo = 'general';
   let empresaAutorizada = '', revisionActual = 0, cargado = false;
-  let pendiente = false, enviando = false, envioEnCola = false, bloqueado = false;
+  let pendiente = false, enviando = false, envioEnCola = false, bloqueado = false, conflictoRemoto = false;
   let completoAnterior = false, lastPct = -1;
 	  const ESPERA_AVISO_MS = 60000;
 	  const ESPERA_SYNC_MS = 8000;
@@ -739,7 +739,7 @@ return out;
     if (temporizadorAviso !== null) clearTimeout(temporizadorAviso);
     temporizadorAviso = null;
     actualizarAvisoSalida();
-    if (!cargado || !pendiente || bloqueado || !ultimoCambio) return;
+    if (!cargado || !pendiente || bloqueado || conflictoRemoto || !ultimoCambio) return;
     const restante = Math.max(0, ESPERA_AVISO_MS - (Date.now() - ultimoCambio));
     temporizadorAviso = setTimeout(() => {
       temporizadorAviso = null;
@@ -752,7 +752,7 @@ return out;
 	  }
 	  function programarSyncRemoto(espera = ESPERA_SYNC_MS) {
 	    cancelarSyncProgramado();
-	    if (!cargado || !pendiente || bloqueado) return;
+	    if (!cargado || !pendiente || bloqueado || conflictoRemoto) return;
 	    temporizadorSync = setTimeout(() => {
 	      temporizadorSync = null;
 	      void sync();
@@ -776,7 +776,7 @@ return out;
     actualizarAvisoSalida();
   }
   function actualizarAvisoSalida() {
-    const hayPendientes = !!(cargado && empresaAutorizada && pendiente && !bloqueado);
+    const hayPendientes = !!(cargado && empresaAutorizada && pendiente && !bloqueado && !conflictoRemoto);
     const chip = document.getElementById('saveChip');
     if (chip) {
       chip.disabled = !(hayPendientes && !enviando);
@@ -854,7 +854,7 @@ return out;
 	  // Cada cambio se guarda inmediatamente en este navegador y se agrupa para
 	  // respaldarlo en SharePoint pocos segundos después, sin una petición por tecla.
   async function sync() {
-    if (!cargado || !pendiente || bloqueado) return;
+    if (!cargado || !pendiente || bloqueado || conflictoRemoto) return;
     if (enviando) { envioEnCola = true; return; }
 	    cancelarSyncProgramado();
     enviando = true;
@@ -879,9 +879,7 @@ return out;
 	      fallo = true;
       pendiente = true;
       if (err.codigo === 409) {
-        bloqueado = true;
-        estadoSWC('Existe una versión más reciente en SharePoint. Los cambios locales se conservan; no se sobrescribirán.', true);
-        bloquearEdicion();
+        activarModoLocalPorConflicto('Existe una versión más reciente en SharePoint. Puede seguir trabajando en esta copia local; el respaldo remoto queda en pausa y ninguna versión se sobrescribirá. Descargue la copia local antes de cerrar.');
       } else {
         estadoSWC('No se pudo respaldar en SharePoint. Las respuestas permanecen guardadas en este navegador.', true);
       }
@@ -913,10 +911,9 @@ return out;
     if (completo && !completoAnterior) void sync();
     completoAnterior = completo;
   };
-  function bloquearEdicion() {
-    document.querySelectorAll('#app input, #app select, #app textarea').forEach(e => e.disabled = true);
+  function mostrarBotonBackupLocal() {
     const cont = document.getElementById('swcEstado');
-    if (cont && !document.getElementById('swcBackup')) {
+    if (cont && empresaAutorizada && !document.getElementById('swcBackup')) {
       const btn = document.createElement('button');
       btn.id = 'swcBackup';
       btn.type = 'button';
@@ -926,7 +923,21 @@ return out;
       cont.appendChild(btn);
     }
   }
+  function bloquearEdicion() {
+    document.querySelectorAll('#app input, #app select, #app textarea').forEach(e => e.disabled = true);
+    mostrarBotonBackupLocal();
+  }
+  function activarModoLocalPorConflicto(msg) {
+    bloqueado = false;
+    conflictoRemoto = true;
+    pendiente = true;
+    cancelarSyncProgramado();
+    estadoSWC(msg, true);
+    guardarLocal();
+    mostrarBotonBackupLocal();
+  }
   function pantallaBloqueada(msg) {
+    conflictoRemoto = false;
     cargado = false;
     document.getElementById('app').innerHTML = '<div class="card"><h2>No se puede abrir este diagnóstico</h2><p>' + esc(msg) + '</p><p class="small muted">El formulario no ha modificado ningún expediente. Conserve su enlace y comuníquese con el equipo del programa.</p></div>';
     estadoSWC('Acceso no disponible', true);
@@ -953,17 +964,23 @@ return out;
       if (remoto.empresa !== empresaAutorizada) {
         throw new Error('Los datos del expediente no corresponden a este enlace.');
       }
-      revisionActual = Number(registrado.revision || 0);
+      const revisionRemota = Number(registrado.revision || 0);
+      revisionActual = revisionRemota;
       const local = leerLocal();
       const deudaRemotaOmitida = !remoto.inst || remoto.inst.deuda !== true;
       // Nunca permitir que un borrador de otra empresa cargue en esta pagina.
       if (local && local.empresa === empresaAutorizada && local.pendiente) {
-        if (Number(local.revision) !== revisionActual) {
-          bloqueado = true;
+        if (Number(local.revision) !== revisionRemota) {
+          revisionActual = Number(local.revision || 0);
           st = Object.assign(E.nuevo(), local.estado);
+          pendiente = true;
+          const t = Date.parse(local.actualizadoEn);
+          ultimoCambio = Number.isFinite(t) && t > 0 ? Math.min(t, Date.now()) : Date.now();
+          completoAnterior = E.prog(st).pct === 100;
+          cargado = true;
           protegerEmpresa();
-          guardarLocal();
-          pantallaBloqueada('Hay cambios sin enviar en este navegador y una revisión distinta en SharePoint. No se sobrescribirá ninguna versión. Descargue su reporte local antes de continuar.');
+          render();
+          activarModoLocalPorConflicto('SharePoint tiene una versión más reciente, pero recuperamos las respuestas de este navegador. Puede seguir trabajando en esta copia local; el respaldo remoto queda en pausa y ninguna versión se sobrescribirá. Descargue la copia local antes de cerrar.');
           return;
         }
         remoto = local.estado;
@@ -1400,7 +1417,7 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
   }
   document.addEventListener('click', e => {
     if (e.target.closest('#swcGuardarFlotante') || e.target.closest('#saveChip')) {
-      if (cargado && pendiente && !bloqueado && !enviando) void sync();
+      if (cargado && pendiente && !bloqueado && !conflictoRemoto && !enviando) void sync();
       return;
     }
     if (e.target.closest('#swcBackup') && empresaAutorizada) {
