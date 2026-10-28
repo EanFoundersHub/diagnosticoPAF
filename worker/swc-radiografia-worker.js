@@ -46,6 +46,16 @@ function normalizarEstado(estado, empresa, id) {
   if (estado.inst?.equity != null && typeof estado.inst.equity !== "boolean") {
     return { ok: false, status: 400, mensaje: "Seleccion de Equity invalida" };
   }
+  if (estado._session != null) {
+    if (!esObjeto(estado._session) ||
+        typeof estado._session.id !== "string" ||
+        !/^[A-Za-z0-9_-]{8,160}$/.test(estado._session.id) ||
+        typeof estado._session.ts !== "number" ||
+        !Number.isFinite(estado._session.ts) || estado._session.ts <= 0) {
+      return { ok: false, status: 400, mensaje: "Sesion de edicion invalida" };
+    }
+    estado._session = { id: estado._session.id, ts: estado._session.ts };
+  }
   for (const clave of ["r", "f", "g", "m", "us", "tx", "fl"]) {
     if (!esObjeto(estado[clave])) return { ok: false, status: 400, mensaje: "Estructura de estado invalida" };
   }
