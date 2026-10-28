@@ -13,6 +13,18 @@ function respuesta(data, status = 200, responseHeaders = headers) {
 }
 
 const esObjeto = valor => !!valor && typeof valor === "object" && !Array.isArray(valor);
+const CAMPOS_FINANCIEROS = new Set([
+  "ing_act", "ing_c1", "ing_c2", "cv_act", "cv_c1", "cv_c2",
+  "uo_act", "uo_c1", "uo_c2", "ebitda_act", "ebitda_c1", "ebitda_c2",
+  "un_act", "un_c1", "un_c2", "activos_act", "activos_c1", "pas_act",
+  "pas_c1", "cxc_act", "cxc_c1", "cxp_act", "cxp_c1", "inv_act",
+  "inv_c1", "caja", "gasto_mensual", "monto", "deuda_fin",
+  "cuota_mensual", "monto_eq"
+]);
+const CAMPOS_QUE_ADMITEN_NEGATIVOS = new Set([
+  "uo_act", "uo_c1", "uo_c2", "ebitda_act", "ebitda_c1", "ebitda_c2",
+  "un_act", "un_c1", "un_c2"
+]);
 
 function normalizarEstado(estado, empresa, id) {
   if (!esObjeto(estado)) return { ok: false, status: 400, mensaje: "Estado invalido" };
@@ -25,6 +37,9 @@ function normalizarEstado(estado, empresa, id) {
   if (estado.instrumentVersion != null && estado.instrumentVersion !== "0.6.1") {
     return { ok: false, status: 409, mensaje: "Version del instrumento no compatible" };
   }
+  if (estado.schemaVersion != null && estado.schemaVersion !== 1) {
+    return { ok: false, status: 409, mensaje: "Version del estado no compatible" };
+  }
   if (estado.inst != null && !esObjeto(estado.inst)) {
     return { ok: false, status: 400, mensaje: "Instrumentos invalidos" };
   }
@@ -34,10 +49,16 @@ function normalizarEstado(estado, empresa, id) {
   for (const clave of ["r", "f", "g", "m", "us", "tx", "fl"]) {
     if (!esObjeto(estado[clave])) return { ok: false, status: 400, mensaje: "Estructura de estado invalida" };
   }
-  for (const valor of Object.values(estado.f)) {
+	  for (const [clave, valor] of Object.entries(estado.f)) {
+	    if (!CAMPOS_FINANCIEROS.has(clave)) {
+	      return { ok: false, status: 400, mensaje: "Campo financiero desconocido" };
+	    }
     if (valor !== "nd" && (typeof valor !== "number" || !Number.isFinite(valor))) {
       return { ok: false, status: 400, mensaje: "Cifra financiera invalida" };
     }
+	    if (typeof valor === "number" && valor < 0 && !CAMPOS_QUE_ADMITEN_NEGATIVOS.has(clave)) {
+	      return { ok: false, status: 400, mensaje: "Cifra financiera fuera de rango" };
+	    }
   }
   for (const valor of Object.values(estado.g)) {
     if (typeof valor !== "string" && (typeof valor !== "number" || !Number.isFinite(valor))) {
