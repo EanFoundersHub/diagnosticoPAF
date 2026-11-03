@@ -819,9 +819,10 @@ return out;
   let pestanaSecundaria = false, sesionRemota = false, controlRemoto = null;
   let temporizadorLease = null, temporizadorSesion = null, verificandoSesion = false, reintentosConciliacion = 0;
   let completoAnterior = false, lastPct = -1;
+  let fallosConsecutivosGuardado = 0;
 	  const ESPERA_AVISO_MS = 60000;
 	  const ESPERA_SYNC_MS = 8000;
-	  const ESPERA_REINTENTO_MS = 30000;
+	  const ESPERA_REINTENTO_MS = 120000;
 	  const TIMEOUT_API_MS = 15000;
 	  const LEASE_MS = 15000;
 	  const LEASE_PULSO_MS = 5000;
@@ -1282,6 +1283,7 @@ return out;
       });
       if (Number(result.revision) !== revisionBase + 1) throw new Error('Revision no confirmada');
       revisionActual = Number(result.revision);
+      fallosConsecutivosGuardado = 0;
       baseEstado = ConflictEngine.clonar(copiaEstado);
       reintentosConciliacion = 0;
       pendiente = (JSON.stringify(st) !== copia);
@@ -1289,6 +1291,7 @@ return out;
       estadoSWC(pendiente ? 'Respaldo actualizado. Hay cambios nuevos pendientes.' : 'Respaldo actualizado en SharePoint · revisión ' + revisionActual);
     } catch (err) {
       pendiente = true;
+      fallosConsecutivosGuardado++;
       if (err.codigo === 409) {
         try {
           const resultado = await conciliarConSharePoint(copiaEstado);
@@ -1305,7 +1308,7 @@ return out;
       guardarLocal();
     } finally {
       enviando = false;
-	      if (pendiente) { programarAvisoFlotante(); programarSyncRemoto(); }
+	      if (pendiente) { programarAvisoFlotante(); if (!fallo && !reintentar) programarSyncRemoto(); }
       else {
         if (temporizadorAviso !== null) clearTimeout(temporizadorAviso);
         temporizadorAviso = null;
@@ -1316,7 +1319,15 @@ return out;
       } else if (envioEnCola && !bloqueado && !conflictoRemoto && !pestanaSecundaria && !sesionRemota) {
         envioEnCola = false;
         if (pendiente) void sync();
-	      } else if (fallo && pendiente && !bloqueado && !conflictoRemoto && !pestanaSecundaria && !sesionRemota) programarSyncRemoto(ESPERA_REINTENTO_MS);
+	      } else if (fallo && pendiente && !bloqueado && !conflictoRemoto && !pestanaSecundaria && !sesionRemota) {
+        if (fallosConsecutivosGuardado <= 2) {
+          programarSyncRemoto(ESPERA_REINTENTO_MS * fallosConsecutivosGuardado);
+        } else {
+          cancelarSyncProgramado();
+          mostrarBotonBackupLocal();
+          estadoSWC('No fue posible conectar con SharePoint. Los cambios permanecen en este navegador. Descargue una copia local; el sistema no seguira reintentando automaticamente.', true);
+        }
+      }
     }
   }
   const save = () => {
@@ -1327,7 +1338,8 @@ return out;
     ultimoCambio = Date.now();
     guardarLocal();
     programarAvisoFlotante();
-	    programarSyncRemoto();
+    if (fallosConsecutivosGuardado <= 2) programarSyncRemoto();
+    else mostrarBotonBackupLocal();
     const avance = E.prog(st);
     const completo = avance.total > 0 && avance.hechas === avance.total;
     if (completo && !completoAnterior) void sync();
@@ -1439,11 +1451,9 @@ return out;
       }
       st = Object.assign(E.nuevo(), remoto);
       protegerEmpresa();
-      if (deudaRemotaOmitida) pendiente = true;
-      if (!sesionActiva(sesionRegistrada) || sesionRegistrada.id !== SESION_ID) {
-        marcarSesion();
-        pendiente = true;
-      }
+      // La apertura sola no modifica ni guarda el expediente.
+      // La deuda se exige en el formulario mediante protegerEmpresa().
+      // La sesion se registra al cambiar respuestas, no al cargar la pagina.
       if (pendiente) {
         const t = local && Date.parse(local.actualizadoEn);
         ultimoCambio = Number.isFinite(t) && t > 0 ? Math.min(t, Date.now()) : Date.now();
@@ -2035,7 +2045,8 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     }
   });
   iniciarControlPestanas();
-  iniciarPulsoSesionRemota();
+  // Sin consultas automaticas periódicas: el formulario solo consulta al abrir o ante un conflicto.
+  // Los cambios reales activan el autoguardado. La sincronizacion entre sesiones usa revisiones.
   void iniciar();
 })();
 </script>
