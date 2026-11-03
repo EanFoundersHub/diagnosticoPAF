@@ -107,7 +107,7 @@ async function llamarFlujo(url, payload, timeoutMs = 12000) {
   } catch (error) {
     if (error?.name === "AbortError") {
       const agotado = new Error("FLUJO_TIMEOUT");
-      agotado.codigo = "FLUJO_TIMEOUT";
+      Object.assign(agotado, { codigo: "FLUJO_TIMEOUT" });
       throw agotado;
     }
     throw error;
@@ -207,7 +207,7 @@ async function guardarConVerificacion(env, payload) {
       }, timeoutFlujo(env, "SWC_VERIFICACION_TIMEOUT_MS", 10000));
     } catch {
       const incierto = new Error("RESULTADO_INCIERTO");
-      incierto.codigo = "RESULTADO_INCIERTO";
+      Object.assign(incierto, { codigo: "RESULTADO_INCIERTO" });
       throw incierto;
     }
     if (verificacion.ok && verificacion.contenido?.ok === true &&
@@ -220,7 +220,7 @@ async function guardarConVerificacion(env, payload) {
       return { ok: false, status: 409, contenido: verificacion.contenido };
     }
     const incierto = new Error("RESULTADO_INCIERTO");
-    incierto.codigo = "RESULTADO_INCIERTO";
+    Object.assign(incierto, { codigo: "RESULTADO_INCIERTO" });
     throw incierto;
   }
 }
