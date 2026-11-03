@@ -11,7 +11,7 @@ test("el formulario no contiene polling remoto", () => {
 });
 
 test("el formulario limita timeout y reintentos", () => {
-  assert.match(html, /const TIMEOUT_API_MS = 15000/);
+  assert.match(html, /const TIMEOUT_API_MS = 45000/);
   assert.match(html, /fallosConsecutivosGuardado <= 2/);
   assert.match(html, /no seguira reintentando automaticamente/);
 });

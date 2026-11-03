@@ -104,12 +104,28 @@ async function llamarFlujo(url, payload, timeoutMs = 12000) {
       redirect: "manual",
       signal: control.signal
     });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const agotado = new Error("FLUJO_TIMEOUT");
+      agotado.codigo = "FLUJO_TIMEOUT";
+      throw agotado;
+    }
+    throw error;
   } finally {
     clearTimeout(limite);
   }
   let contenido = null;
   try { contenido = await r.json(); } catch { /* Respuesta no JSON */ }
   return { ok: r.ok, status: r.status, contenido };
+}
+
+function urlFlujo(env, tipo) {
+  return env.SWC_FLUJO_URL || (tipo === "consulta" ? env.SWC_CONSULTA_URL : env.SWC_AUTOGUARDADO_URL);
+}
+
+function timeoutFlujo(env, clave, predeterminado) {
+  const valor = Number(env[clave]);
+  return Number.isFinite(valor) ? Math.max(100, Math.min(60000, valor)) : predeterminado;
 }
 
 // Un listado reciente se reutiliza entre consultas al mismo Worker.
@@ -123,7 +139,7 @@ async function obtenerListado(env) {
   if (listadoCache && Date.now() < listadoCaduca) return listadoCache;
   if (listadoEnCurso) return listadoEnCurso;
   listadoEnCurso = (async () => {
-    const res = await llamarFlujo(env.SWC_CONSULTA_URL, { operacion: "consultar" });
+    const res = await llamarFlujo(urlFlujo(env, "consulta"), { operacion: "consultar" });
     if (!res.ok || !Array.isArray(res.contenido)) throw new Error("CONSULTA_LISTADO_FALLIDA");
     listadoCache = res.contenido;
     listadoCaduca = Date.now() + 30000;
@@ -144,7 +160,7 @@ async function consultarExpediente(env, empresa, id) {
     if (typeof archivo.identificador !== "string" || !archivo.identificador) {
       throw new Error("ARCHIVO_SIN_IDENTIFICADOR");
     }
-    const lectura = await llamarFlujo(env.SWC_CONSULTA_URL, {
+    const lectura = await llamarFlujo(urlFlujo(env, "consulta"), {
       operacion: "consultar", modo: "archivo", identificador: archivo.identificador
     });
     if (!lectura.ok || lectura.contenido?.ok !== true) throw new Error("LECTURA_FALLIDA");
@@ -158,6 +174,39 @@ async function consultarExpediente(env, empresa, id) {
   consultasEnCurso.set(id, tarea);
   try { return await tarea; }
   finally { consultasEnCurso.delete(id); }
+}
+
+async function guardarConVerificacion(env, payload) {
+  const url = urlFlujo(env, "guardar");
+  try {
+    return await llamarFlujo(url, payload, timeoutFlujo(env, "SWC_GUARDADO_TIMEOUT_MS", 25000));
+  } catch (error) {
+    if (error?.codigo !== "FLUJO_TIMEOUT") throw error;
+    // Abortar la espera HTTP no cancela una ejecución ya iniciada de Power Automate.
+    // Antes de permitir un reintento se consulta la marca persistente de SharePoint.
+    let verificacion;
+    try {
+      verificacion = await llamarFlujo(url, {
+        operacion: "verificar", id: payload.id, empresa: payload.empresa,
+        revision: payload.revision, idempotencia: payload.idempotencia
+      }, timeoutFlujo(env, "SWC_VERIFICACION_TIMEOUT_MS", 10000));
+    } catch {
+      const incierto = new Error("RESULTADO_INCIERTO");
+      incierto.codigo = "RESULTADO_INCIERTO";
+      throw incierto;
+    }
+    if (verificacion.ok && verificacion.contenido?.ok === true &&
+        verificacion.contenido?.confirmado === true &&
+        Number(verificacion.contenido?.revision) === payload.revision) {
+      return { ok: true, status: 200, contenido: { ok: true, verificado: true } };
+    }
+    if (verificacion.status === 409 || verificacion.contenido?.codigo === "REVISION_DESACTUALIZADA") {
+      return { ok: false, status: 409, contenido: verificacion.contenido };
+    }
+    const incierto = new Error("RESULTADO_INCIERTO");
+    incierto.codigo = "RESULTADO_INCIERTO";
+    throw incierto;
+  }
 }
 
 function limpiarConfirmaciones(ahora = Date.now()) {
@@ -267,11 +316,17 @@ export default {
           return responder({ ok: false, guardado: false, codigo: "REVISION_DESACTUALIZADA", mensaje: "Hay un respaldo mas reciente" }, 409);
         }
         if (!entrada) {
-          entrada = { firma, tarea: llamarFlujo(env.SWC_AUTOGUARDADO_URL, payload) };
+          entrada = { firma, tarea: guardarConVerificacion(env, payload) };
           guardadosEnCurso.set(idempotencia, entrada);
         }
         let guardado;
         try { guardado = await entrada.tarea; }
+        catch (error) {
+          const mensaje = error?.codigo === "RESULTADO_INCIERTO"
+            ? "No fue posible confirmar el resultado del guardado"
+            : "No se pudo guardar el diagnostico";
+          return responder({ ok: false, guardado: false, codigo: error?.codigo || "GUARDADO_FALLIDO", mensaje }, 503);
+        }
         finally { guardadosEnCurso.delete(idempotencia); }
         if (guardado.status === 409) {
 	          return responder({ ok: false, guardado: false,

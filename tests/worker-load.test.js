@@ -9,8 +9,7 @@ const empresas = Array.from({ length: 28 }, (_, i) => ({
 }));
 
 const env = {
-  SWC_CONSULTA_URL: "https://power.example/consulta",
-  SWC_AUTOGUARDADO_URL: "https://power.example/guardar",
+  SWC_FLUJO_URL: "https://power.example/SWC-Guardar-Radiografia",
   SWC_ORIGENES_PERMITIDOS: "https://eanfoundershub.github.io",
   SWC_ACCESOS: JSON.stringify(Object.fromEntries(empresas.map(e => [e.codigo, { empresa: e.empresa, id: e.id }])))
 };
@@ -103,6 +102,57 @@ test("un fallo de Power Automate no inicia reintentos desde el Worker", async ()
   }), env);
   assert.equal(res.status, 503);
   assert.equal(llamadas, 1);
+});
+
+test("un timeout de guardado se verifica persistentemente antes de responder", async () => {
+  const e = empresas[5];
+  const envRapido = { ...env, SWC_GUARDADO_TIMEOUT_MS: "100", SWC_VERIFICACION_TIMEOUT_MS: "100" };
+  let guardados = 0, verificaciones = 0;
+  globalThis.fetch = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    if (payload.operacion === "guardar") {
+      guardados++;
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    }
+    if (payload.operacion === "verificar") {
+      verificaciones++;
+      return Response.json({ ok: true, confirmado: true, revision: payload.revision });
+    }
+    throw new Error("llamada inesperada");
+  };
+  const res = await worker.fetch(solicitud(e, "guardar", {
+    revisionBase: 80, revision: 81, avance: 80, estadoJson: JSON.stringify(estado(e, "incierto"))
+  }), envRapido);
+  assert.equal(res.status, 200);
+  assert.equal(guardados, 1);
+  assert.equal(verificaciones, 1);
+});
+
+test("la idempotencia persistente protege entre dos instancias del Worker", async () => {
+  const marca = Date.now();
+  const [instanciaA, instanciaB] = await Promise.all([
+    import(`../worker/swc-radiografia-worker-hotfix.js?instancia=a-${marca}`),
+    import(`../worker/swc-radiografia-worker-hotfix.js?instancia=b-${marca}`)
+  ]);
+  const e = empresas[6];
+  const procesadas = new Map();
+  let escrituras = 0;
+  globalThis.fetch = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    if (payload.operacion !== "guardar") throw new Error("llamada inesperada");
+    if (!procesadas.has(payload.idempotencia)) {
+      procesadas.set(payload.idempotencia, payload.revision);
+      escrituras++;
+    }
+    return Response.json({ ok: true, revision: procesadas.get(payload.idempotencia) });
+  };
+  const extra = { revisionBase: 90, revision: 91, avance: 90, estadoJson: JSON.stringify(estado(e, "persistente")) };
+  const a = await instanciaA.default.fetch(solicitud(e, "guardar", extra), env);
+  const b = await instanciaB.default.fetch(solicitud(e, "guardar", extra), env);
+  assert.deepEqual([a.status, b.status], [200, 200]);
+  assert.equal(escrituras, 1);
 });
 
 test("los códigos y expedientes no se pueden cruzar", async () => {
