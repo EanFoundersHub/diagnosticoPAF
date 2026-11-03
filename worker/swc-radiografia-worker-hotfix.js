@@ -128,6 +128,20 @@ function timeoutFlujo(env, clave, predeterminado) {
   return Number.isFinite(valor) ? Math.max(100, Math.min(60000, valor)) : predeterminado;
 }
 
+function canonico(valor) {
+  if (Array.isArray(valor)) return valor.map(canonico);
+  if (esObjeto(valor)) {
+    return Object.fromEntries(Object.keys(valor).sort().map(clave => [clave, canonico(valor[clave])]));
+  }
+  return valor;
+}
+
+async function huellaSha256(valor) {
+  const bytes = new TextEncoder().encode(JSON.stringify(canonico(valor)));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 // Un listado reciente se reutiliza entre consultas al mismo Worker.
 let listadoCache = null;
 let listadoCaduca = 0;
@@ -188,7 +202,8 @@ async function guardarConVerificacion(env, payload) {
     try {
       verificacion = await llamarFlujo(url, {
         operacion: "verificar", id: payload.id, empresa: payload.empresa,
-        revision: payload.revision, idempotencia: payload.idempotencia
+        revision: payload.revision, idempotencia: payload.idempotencia,
+        huellaContenido: payload.huellaContenido
       }, timeoutFlujo(env, "SWC_VERIFICACION_TIMEOUT_MS", 10000));
     } catch {
       const incierto = new Error("RESULTADO_INCIERTO");
@@ -197,7 +212,8 @@ async function guardarConVerificacion(env, payload) {
     }
     if (verificacion.ok && verificacion.contenido?.ok === true &&
         verificacion.contenido?.confirmado === true &&
-        Number(verificacion.contenido?.revision) === payload.revision) {
+        Number(verificacion.contenido?.revision) === payload.revision &&
+        verificacion.contenido?.huellaContenido === payload.huellaContenido) {
       return { ok: true, status: 200, contenido: { ok: true, verificado: true } };
     }
     if (verificacion.status === 409 || verificacion.contenido?.codigo === "REVISION_DESACTUALIZADA") {
@@ -290,9 +306,18 @@ export default {
 	        if (!validacion.ok) return responder({ ok: false, mensaje: validacion.mensaje }, validacion.status);
 	        estado = validacion.estado;
 	        estadoJson = JSON.stringify(estado);
+        const reporteHtml = typeof datos.reporteHtml === "string" ? datos.reporteHtml : null;
+        if (reporteHtml !== null && reporteHtml.length > 700000) {
+          return responder({ ok: false, mensaje: "Reporte HTML demasiado grande" }, 413);
+        }
+        const huellaContenido = await huellaSha256({
+          estado: estado,
+          avance: datos.avance,
+          reporteHtml
+        });
         const idempotencia = id + ":" + nueva;
         limpiarConfirmaciones();
-        const firma = estadoJson + "\n" + datos.avance + "\n" + (datos.reporteHtml || "");
+        const firma = huellaContenido;
         const confirmado = guardadosConfirmados.get(idempotencia);
         if (confirmado) {
           if (confirmado.firma !== firma) {
@@ -303,14 +328,9 @@ export default {
         const payload = {
           operacion: "guardar", tipoRespaldo: "autoguardado", id, empresa,
           avance: datos.avance, revisionBase: base, revision: nueva, estadoJson,
-          idempotencia
+          idempotencia, huellaContenido
         };
-        if (typeof datos.reporteHtml === "string") {
-          if (datos.reporteHtml.length > 700000) {
-            return responder({ ok: false, mensaje: "Reporte HTML demasiado grande" }, 413);
-          }
-          payload.reporteHtml = datos.reporteHtml;
-        }
+        if (reporteHtml !== null) payload.reporteHtml = reporteHtml;
         let entrada = guardadosEnCurso.get(idempotencia);
         if (entrada && entrada.firma !== firma) {
           return responder({ ok: false, guardado: false, codigo: "REVISION_DESACTUALIZADA", mensaje: "Hay un respaldo mas reciente" }, 409);

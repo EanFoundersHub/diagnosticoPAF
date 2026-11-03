@@ -14,7 +14,8 @@ El Worker acepta `SWC_FLUJO_URL` como URL única. Los nombres anteriores `SWC_CO
 - Un cambio que deja el estado igual a la base no se guarda. El navegador hace como máximo dos reintentos, a los 2 y 4 minutos.
 - Los `Map()` del Worker únicamente agrupan solicitudes dentro de una instancia. **No proporcionan exclusión ni idempotencia entre instancias.** La garantía efectiva debe residir en SharePoint y en la escritura condicional del flujo.
 - Un timeout HTTP no cancela Power Automate. El Worker espera hasta 25 segundos para `guardar`; si pierde la respuesta, ejecuta una sola operación `verificar` de hasta 10 segundos. El navegador espera 45 segundos, de modo que no repite antes de recibir esa verificación.
-- Si tampoco se puede verificar, se responde `503 RESULTADO_INCIERTO`. Un reintento posterior conserva la misma pareja expediente/revisión e `idempotencia`, por lo que el flujo debe reconocerlo sin reescribir.
+- Si tampoco se puede verificar, se responde `503 RESULTADO_INCIERTO`. Un reintento posterior conserva la misma pareja expediente/revisión, `idempotencia` y `huellaContenido`, por lo que el flujo debe reconocerlo sin reescribir.
+- `huellaContenido` es SHA-256 hexadecimal sobre JSON canónico de `{estado normalizado, avance, reporteHtml}`. Las claves de objetos se ordenan recursivamente; los arreglos conservan su orden y la ausencia de reporte se representa como `null`.
 
 ## Cambio mínimo en `SWC - Guardar Radiografia`
 
@@ -22,7 +23,7 @@ No modificar todavía la concurrencia global del disparador: al ser un flujo com
 
 ### Contrato común
 
-1. Añadir `idempotencia` al esquema como texto para `guardar` y `verificar`. El Worker envía `EXPEDIENTE:REVISION`.
+1. Añadir `idempotencia` y `huellaContenido` al esquema como textos obligatorios para `guardar` y `verificar`. Validar `huellaContenido` con la expresión `^[0-9a-f]{64}$`. El Worker envía `EXPEDIENTE:REVISION` y calcula la huella después de normalizar y validar el estado.
 2. Determinar la ruta únicamente con el `id` y la empresa autorizados por el Worker. Nunca aceptar una ruta o nombre de archivo libre desde el cliente.
 3. Activar **Secure Inputs** y **Secure Outputs** donde aparezcan `estadoJson`, contenido del archivo o identificadores.
 4. Mantener sin reintentos `Consultar Archivos SWC` y `Leer Contenido Archivo SWC`.
@@ -35,21 +36,33 @@ Conservar las operaciones actuales de listado y lectura por `identificador`. Res
 ### Rama `guardar`: validación persistente y escritura condicional
 
 1. Leer `estado.json`, su ETag actual y el contenido persistido antes de escribir.
-2. El contenido persistido debe conservar `revision` e `idempotenciaUltima` junto al estado existente. No eliminar ni reconstruir respuestas financieras.
-3. Si `revision == revision solicitada` e `idempotenciaUltima == idempotencia`, responder `200 {"ok":true,"revision":N,"repetido":true}` sin escribir.
+2. El contenido persistido debe conservar `revision`, `idempotenciaUltima` y `huellaContenidoUltima` junto al estado existente. No eliminar ni reconstruir respuestas financieras.
+3. Si `revision == revision solicitada`, comparar ambas marcas. Solo si `idempotenciaUltima == idempotencia` **y** `huellaContenidoUltima == huellaContenido`, responder `200 {"ok":true,"revision":N,"repetido":true}` sin escribir. Si coincide la idempotencia pero cambia la huella, responder `409 CONTENIDO_DIFERENTE`.
 4. Si la revisión persistida no coincide con `revisionBase`, responder `409 REVISION_DESACTUALIZADA` sin modificar el archivo.
-5. Escribir mediante una solicitud HTTP a SharePoint con `IF-MATCH` igual al ETag leído, nunca con `*`. En el mismo contenido guardar la nueva revisión y `idempotenciaUltima`.
-6. Si SharePoint devuelve `412 Precondition Failed`, releer una vez: si ya aparece la misma idempotencia, responder `200`; en cualquier otro caso responder `409`. No reintentar la escritura.
+5. Escribir mediante una solicitud HTTP a SharePoint con `IF-MATCH` igual al ETag leído, nunca con `*`. En el mismo contenido guardar la nueva revisión, `idempotenciaUltima` y `huellaContenidoUltima`.
+6. Si SharePoint devuelve `412 Precondition Failed`, releer una vez: responder `200` solo si coinciden idempotencia y huella; responder `409 CONTENIDO_DIFERENTE` si la idempotencia coincide pero la huella no; en cualquier otro caso responder `409 REVISION_DESACTUALIZADA`. No reintentar la escritura.
 7. Mantener la acción de escritura con reintentos en **Ninguno**. Responder `200` solo después de confirmación de SharePoint.
 
 Esta escritura condicional protege entre ejecuciones concurrentes, instancias distintas del Worker y respuestas tardías. Una lista auxiliar de operaciones puede servir para auditoría, pero no debe sustituir el ETag del propio expediente ni crear dos escrituras no atómicas.
 
+### Creación inicial cuando no existe `estado.json`
+
+No hacer primero «comprobar si existe» y después una creación ordinaria: dos ejecuciones podrían superar la comprobación. La creación debe ser atómica.
+
+1. Permitir creación únicamente con `revisionBase == 0` y `revision == 1`, para un `id` y una carpeta autorizados.
+2. Construir el archivo completo con `revision:1`, `idempotenciaUltima` y `huellaContenidoUltima`, sin alterar el estado normalizado recibido.
+3. Usar **Enviar una solicitud HTTP a SharePoint** con `POST` a `.../Files/Add(url='estado.json',overwrite=false)`. `overwrite=false` es obligatorio; no usar `true`, `IF-MATCH:*`, «Crear o reemplazar» ni borrar previamente.
+4. Si la creación responde éxito, devolver `200` después de leer/confirmar el archivo creado.
+5. Si SharePoint informa que el archivo ya existe (`409`), releerlo una vez. Si revisión, idempotencia y huella coinciden, devolver `200 repetido:true`; si la misma revisión tiene otra huella, devolver `409 CONTENIDO_DIFERENTE`; en cualquier otro caso devolver `409 REVISION_DESACTUALIZADA`.
+6. Mantener reintentos en **Ninguno** para la creación. Así, dos creaciones concurrentes producen exactamente un archivo y ninguna sobrescritura.
+7. Para expedientes existentes que aún no tengan `idempotenciaUltima` o `huellaContenidoUltima`, no ejecutar una migración masiva. Incorporar ambas marcas únicamente en el siguiente guardado válido protegido por el ETag actual. La revisión existente sigue siendo la autoridad.
+
 ### Rama `verificar`
 
-1. Recibir `id`, `empresa`, `revision` e `idempotencia`; no escribir nada.
+1. Recibir `id`, `empresa`, `revision`, `idempotencia` y `huellaContenido`; no escribir nada.
 2. Leer el `estado.json` del expediente.
-3. Si coinciden `revision` e `idempotenciaUltima`, responder `200 {"ok":true,"confirmado":true,"revision":N}`.
-4. Si la revisión almacenada es mayor o pertenece a otra idempotencia, responder `409 REVISION_DESACTUALIZADA`.
+3. Si coinciden revisión, idempotencia y huella, responder `200 {"ok":true,"confirmado":true,"revision":N,"huellaContenido":"..."}`.
+4. Si revisión e idempotencia coinciden pero la huella difiere, responder `409 CONTENIDO_DIFERENTE`. Si la revisión es mayor o pertenece a otra idempotencia, responder `409 REVISION_DESACTUALIZADA`.
 5. Si todavía no se observa la operación, responder `200 {"ok":true,"confirmado":false,"revision":actual}`. No esperar en bucle.
 
 ## Secuencia mínima de recuperación — aún no ejecutar
@@ -65,7 +78,7 @@ Esta escritura condicional protege entre ejecuciones concurrentes, instancias di
 
 ## Pruebas simuladas incluidas
 
-`npm test` usa dobles de HTTP; no accede a Power Automate ni a SharePoint. Cubre 28 empresas aisladas, listado compartido, duplicados dentro de una instancia, dos instancias con idempotencia persistente simulada, conflicto de contenidos, timeout seguido de verificación, fallos sin reintento y rechazo de cruces de empresa.
+`npm test` usa dobles de HTTP; no accede a Power Automate ni a SharePoint. Cubre 28 empresas aisladas, listado compartido, duplicados dentro de una instancia, repetición idéntica entre dos instancias, rechazo entre instancias de contenidos diferentes para la misma revisión, creación inicial condicional concurrente, timeout seguido de verificación, fallos sin reintento y rechazo de cruces de empresa.
 
 Estas pruebas demuestran el comportamiento del código y el contrato esperado. **No prueban que el flujo real tenga ETag, idempotencia persistida, permisos correctos ni respuestas HTTP correctas.**
 
@@ -74,12 +87,14 @@ Estas pruebas demuestran el comportamiento del código y el contrato esperado. *
 Usar solo el expediente aislado, nunca una de las 28 empresas:
 
 1. Consultar y confirmar que no hubo escritura.
-2. Guardar un cambio controlado y confirmar exactamente una escritura, revisión `N+1` e `idempotenciaUltima`.
-3. Repetir el mismo payload y confirmar `200 repetido:true`, cero escrituras adicionales y contenido idéntico.
+2. Guardar un cambio controlado y confirmar exactamente una escritura, revisión `N+1`, `idempotenciaUltima` y `huellaContenidoUltima`.
+3. Repetir el mismo payload y confirmar `200 repetido:true`, cero escrituras adicionales y huella idéntica.
 4. Enviar dos contenidos distintos con la misma `revisionBase`; uno debe guardar y el otro responder `409`, o `412` convertido a `409`.
 5. Forzar pérdida de respuesta después de la escritura; `verificar` debe confirmar el resultado sin segunda escritura.
 6. Forzar timeout antes de escribir; `verificar` debe devolver `confirmado:false` y el reintento posterior debe producir una sola escritura.
 7. Abrir el formulario cinco minutos sin cambios y confirmar cero ejecuciones adicionales.
+8. En una carpeta aislada sin `estado.json`, lanzar dos creaciones idénticas simultáneas: ambas pueden responder 200, pero debe existir un solo archivo y una sola creación efectiva.
+9. Repetir la creación concurrente con contenidos distintos para revisión 1: exactamente una debe persistir y la otra debe responder `409 CONTENIDO_DIFERENTE`.
 
 ## Reversión
 

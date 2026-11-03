@@ -118,7 +118,7 @@ test("un timeout de guardado se verifica persistentemente antes de responder", a
     }
     if (payload.operacion === "verificar") {
       verificaciones++;
-      return Response.json({ ok: true, confirmado: true, revision: payload.revision });
+      return Response.json({ ok: true, confirmado: true, revision: payload.revision, huellaContenido: payload.huellaContenido });
     }
     throw new Error("llamada inesperada");
   };
@@ -143,16 +143,97 @@ test("la idempotencia persistente protege entre dos instancias del Worker", asyn
     const payload = JSON.parse(options.body);
     if (payload.operacion !== "guardar") throw new Error("llamada inesperada");
     if (!procesadas.has(payload.idempotencia)) {
-      procesadas.set(payload.idempotencia, payload.revision);
+      procesadas.set(payload.idempotencia, { revision: payload.revision, huella: payload.huellaContenido });
       escrituras++;
     }
-    return Response.json({ ok: true, revision: procesadas.get(payload.idempotencia) });
+    const previa = procesadas.get(payload.idempotencia);
+    if (previa.huella !== payload.huellaContenido) {
+      return Response.json({ ok: false, codigo: "REVISION_DESACTUALIZADA" }, { status: 409 });
+    }
+    return Response.json({ ok: true, revision: previa.revision });
   };
   const extra = { revisionBase: 90, revision: 91, avance: 90, estadoJson: JSON.stringify(estado(e, "persistente")) };
   const a = await instanciaA.default.fetch(solicitud(e, "guardar", extra), env);
   const b = await instanciaB.default.fetch(solicitud(e, "guardar", extra), env);
   assert.deepEqual([a.status, b.status], [200, 200]);
   assert.equal(escrituras, 1);
+});
+
+test("dos instancias rechazan contenidos distintos para la misma revisión persistente", async () => {
+  const marca = Date.now();
+  const [instanciaA, instanciaB] = await Promise.all([
+    import(`../worker/swc-radiografia-worker-hotfix.js?huella=a-${marca}`),
+    import(`../worker/swc-radiografia-worker-hotfix.js?huella=b-${marca}`)
+  ]);
+  const e = empresas[7];
+  let persistido = null, escrituras = 0;
+  globalThis.fetch = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    if (!persistido) {
+      persistido = { idempotencia: payload.idempotencia, huella: payload.huellaContenido };
+      escrituras++;
+      return Response.json({ ok: true });
+    }
+    if (persistido.idempotencia === payload.idempotencia && persistido.huella === payload.huellaContenido) {
+      return Response.json({ ok: true, repetido: true });
+    }
+    return Response.json({ ok: false, codigo: "REVISION_DESACTUALIZADA" }, { status: 409 });
+  };
+  const base = { revisionBase: 100, revision: 101, avance: 50 };
+  const a = await instanciaA.default.fetch(solicitud(e, "guardar", { ...base, estadoJson: JSON.stringify(estado(e, "A")) }), env);
+  const b = await instanciaB.default.fetch(solicitud(e, "guardar", { ...base, estadoJson: JSON.stringify(estado(e, "B")) }), env);
+  assert.deepEqual([a.status, b.status], [200, 409]);
+  assert.equal(escrituras, 1);
+});
+
+test("la creación inicial condicional permite un solo estado.json", async () => {
+  const marca = Date.now();
+  const [instanciaA, instanciaB] = await Promise.all([
+    import(`../worker/swc-radiografia-worker-hotfix.js?crear=a-${marca}`),
+    import(`../worker/swc-radiografia-worker-hotfix.js?crear=b-${marca}`)
+  ]);
+  const e = empresas[8];
+  let creado = null, creaciones = 0;
+  globalThis.fetch = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    // Simula Files/Add(overwrite=false): la comprobación y creación son atómicas.
+    if (!creado) {
+      creado = { idempotencia: payload.idempotencia, huella: payload.huellaContenido };
+      creaciones++;
+      return Response.json({ ok: true, creado: true });
+    }
+    if (creado.idempotencia === payload.idempotencia && creado.huella === payload.huellaContenido) {
+      return Response.json({ ok: true, repetido: true });
+    }
+    return Response.json({ ok: false, codigo: "REVISION_DESACTUALIZADA" }, { status: 409 });
+  };
+  const extra = { revisionBase: 0, revision: 1, avance: 0, estadoJson: JSON.stringify(estado(e, "inicial")) };
+  const [a, b] = await Promise.all([
+    instanciaA.default.fetch(solicitud(e, "guardar", extra), env),
+    instanciaB.default.fetch(solicitud(e, "guardar", extra), env)
+  ]);
+  assert.deepEqual([a.status, b.status], [200, 200]);
+  assert.equal(creaciones, 1);
+});
+
+test("la huella cubre estado normalizado, avance y reporte completo", async () => {
+  const e = empresas[9];
+  const huellas = [];
+  globalThis.fetch = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    huellas.push(payload.huellaContenido);
+    return Response.json({ ok: true });
+  };
+  const estadoComun = JSON.stringify(estado(e, "huella"));
+  await worker.fetch(solicitud(e, "guardar", { revisionBase: 110, revision: 111, avance: 20, estadoJson: estadoComun, reporteHtml: "<p>R1</p>" }), env);
+  await worker.fetch(solicitud(e, "guardar", { revisionBase: 111, revision: 112, avance: 20, estadoJson: estadoComun, reporteHtml: "<p>R1</p>" }), env);
+  await worker.fetch(solicitud(e, "guardar", { revisionBase: 112, revision: 113, avance: 20, estadoJson: estadoComun, reporteHtml: "<p>R2</p>" }), env);
+  await worker.fetch(solicitud(e, "guardar", { revisionBase: 113, revision: 114, avance: 21, estadoJson: estadoComun, reporteHtml: "<p>R2</p>" }), env);
+  assert.ok(huellas.every(x => /^[0-9a-f]{64}$/.test(x)));
+  assert.equal(huellas[0], huellas[1]);
+  assert.notEqual(huellas[1], huellas[2]);
+  assert.notEqual(huellas[2], huellas[3]);
 });
 
 test("los códigos y expedientes no se pueden cruzar", async () => {
