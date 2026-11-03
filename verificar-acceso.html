@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer">
+<title>Comprobación de acceso · Swisscontact</title>
+<style>body{font:16px/1.55 system-ui,Arial,sans-serif;background:#f2f4f6;color:#22303a;margin:0}main{max-width:650px;margin:32px auto;padding:30px;background:white;border-radius:12px;box-shadow:0 2px 14px #0001}h1{color:#004d8b;font-size:24px}#resultado{white-space:pre-wrap;padding:18px;background:#f4f5f7;border-left:4px solid #004d8b;border-radius:6px;font-weight:600}small{color:#576773}button{border:0;background:#004d8b;color:#fff;padding:12px 20px;border-radius:6px;cursor:pointer;font:inherit}</style></head>
+<body><main><h1>Verificación de acceso al diagnóstico</h1>
+<p>Esta herramienta solo consulta el estado de acceso. <strong>No modifica ni guarda información de ninguna empresa.</strong></p>
+<p id="resultado" role="status" aria-live="polite">Preparando consulta...</p>
+<button id="volver" type="button">Volver a comprobar</button>
+<p><small>Si el resultado indica 403, se debe verificar el código en SWC_ACCESOS de Cloudflare. Si indica 502, revisar el flujo de consulta y los expedientes en SharePoint. Esta página no muestra el código de acceso ni los datos de la empresa.</small></p></main>
+<script>
+(() => {
+  'use strict';
+  const $ = document.getElementById('resultado');
+  const API = 'https://swc-radiografia-api.afcaballero.workers.dev/api/diagnostico';
+  const acceso = new URLSearchParams(location.search).get('acceso') || '';
+  async function comprobar() {
+    if (!/^[A-Za-z0-9_-]{20,160}$/.test(acceso)) { $.textContent = 'Falta un código de acceso válido en el enlace.'; return; }
+    $.textContent = 'Consultando acceso y expediente...';
+    const controller = new AbortController();
+    const t = setTimeout(()=>controller.abort(),20000);
+    try {
+      const res = await fetch(API, {method:'POST',cache:'no-store',referrerPolicy:'no-referrer',headers:{'Content-Type':'application/json'},body:JSON.stringify({accion:'consultar',acceso}),signal:controller.signal});
+      const d = await res.json().catch(()=>({}));
+      let mensaje = 'Respuesta HTTP ' + res.status + '.\n';
+      if (res.status === 403) mensaje += 'El servidor no reconoce este código de acceso o lo ha rechazado. Revisar SWC_ACCESOS en Cloudflare.';
+      else if (res.status === 502) mensaje += 'Fallo de lectura o consulta del expediente. Revisar el flujo de SharePoint y el archivo estado.json.';
+      else if (res.status === 200 && d.ok && d.existe && d.estado) mensaje += 'Acceso reconocido y expediente recuperado correctamente. Si el formulario principal falla, revisar el formato del expediente.';
+      else if (res.status === 200 && d.ok && !d.existe) mensaje += 'Acceso reconocido, pero no existe el expediente precargado. Revisar el nombre de carpeta y estado.json en SharePoint.';
+      else if (res.status === 200) mensaje += 'Respuesta recibida, pero faltan datos esperados del expediente.';
+      else mensaje += 'Respuesta de servidor: ' + (typeof d.mensaje==='string'?d.mensaje:'sin detalle');
+      $.textContent = mensaje;
+    } catch(e) { $.textContent = e.name==='AbortError' ? 'No respondió el servidor en 20 segundos.' : 'No se pudo contactar al servidor (' + (e.name||'error de red') + ').'; }
+    finally { clearTimeout(t); }
+  }
+  document.getElementById('volver').addEventListener('click',comprobar);
+  comprobar();
+})();
+</script></body></html>
