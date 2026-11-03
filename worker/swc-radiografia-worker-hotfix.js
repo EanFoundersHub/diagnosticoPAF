@@ -91,14 +91,22 @@ function normalizarEstado(estado, empresa, id) {
   return { ok: true, estado };
 }
 
-async function llamarFlujo(url, payload) {
+async function llamarFlujo(url, payload, timeoutMs = 12000) {
   if (!url || !url.startsWith("https://")) throw new Error("FLUJO_NO_CONFIGURADO");
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify(payload),
-    redirect: "manual"
-  });
+  const control = new AbortController();
+  const limite = setTimeout(() => control.abort(), timeoutMs);
+  let r;
+  try {
+    r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(payload),
+      redirect: "manual",
+      signal: control.signal
+    });
+  } finally {
+    clearTimeout(limite);
+  }
   let contenido = null;
   try { contenido = await r.json(); } catch { /* Respuesta no JSON */ }
   return { ok: r.ok, status: r.status, contenido };
@@ -108,6 +116,9 @@ async function llamarFlujo(url, payload) {
 let listadoCache = null;
 let listadoCaduca = 0;
 let listadoEnCurso = null;
+const consultasEnCurso = new Map();
+const guardadosEnCurso = new Map();
+const guardadosConfirmados = new Map();
 async function obtenerListado(env) {
   if (listadoCache && Date.now() < listadoCaduca) return listadoCache;
   if (listadoEnCurso) return listadoEnCurso;
@@ -120,6 +131,39 @@ async function obtenerListado(env) {
   })();
   try { return await listadoEnCurso; }
   finally { listadoEnCurso = null; }
+}
+
+async function consultarExpediente(env, empresa, id) {
+  if (consultasEnCurso.has(id)) return consultasEnCurso.get(id);
+  const tarea = (async () => {
+    const listado = await obtenerListado(env);
+    const archivo = listado.find(a =>
+      a.nombre === "estado.json" && mismaCarpeta(a.carpeta, empresa)
+    );
+    if (!archivo) return { existe: false, estado: null };
+    if (typeof archivo.identificador !== "string" || !archivo.identificador) {
+      throw new Error("ARCHIVO_SIN_IDENTIFICADOR");
+    }
+    const lectura = await llamarFlujo(env.SWC_CONSULTA_URL, {
+      operacion: "consultar", modo: "archivo", identificador: archivo.identificador
+    });
+    if (!lectura.ok || lectura.contenido?.ok !== true) throw new Error("LECTURA_FALLIDA");
+    const raw = lectura.contenido.contenido;
+    const estado = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!estado || typeof estado !== "object" || estado.empresa !== empresa) {
+      throw new Error("EXPEDIENTE_INVALIDO");
+    }
+    return { existe: true, estado };
+  })();
+  consultasEnCurso.set(id, tarea);
+  try { return await tarea; }
+  finally { consultasEnCurso.delete(id); }
+}
+
+function limpiarConfirmaciones(ahora = Date.now()) {
+  for (const [clave, valor] of guardadosConfirmados) {
+    if (valor.caduca <= ahora) guardadosConfirmados.delete(clave);
+  }
 }
 
 function mismaCarpeta(ruta, empresa) {
@@ -169,28 +213,10 @@ export default {
       const { empresa, id } = autorizado;
 
       if (datos.accion === "consultar") {
-        let listado;
-        try { listado = await obtenerListado(env); }
+        let expediente;
+        try { expediente = await consultarExpediente(env, empresa, id); }
         catch { return responder({ ok: false, mensaje: "No se pudo consultar el diagnostico" }, 502); }
-        const archivo = listado.find(a =>
-          a.nombre === "estado.json" && mismaCarpeta(a.carpeta, empresa)
-        );
-        if (!archivo) return responder({ ok: true, empresa, existe: false, estado: null });
-        if (typeof archivo.identificador !== "string" || !archivo.identificador) {
-          return responder({ ok: false, mensaje: "Archivo sin identificador" }, 502);
-        }
-        const lectura = await llamarFlujo(env.SWC_CONSULTA_URL, {
-          operacion: "consultar", modo: "archivo", identificador: archivo.identificador
-        });
-        if (!lectura.ok || lectura.contenido?.ok !== true) {
-          return responder({ ok: false, mensaje: "No se pudo leer el diagnostico" }, 502);
-        }
-        const raw = lectura.contenido.contenido;
-        const estado = typeof raw === "string" ? JSON.parse(raw) : raw;
-        if (!estado || typeof estado !== "object" || estado.empresa !== empresa) {
-          return responder({ ok: false, mensaje: "Expediente no valido" }, 502);
-        }
-        return responder({ ok: true, empresa, existe: true, estado });
+        return responder({ ok: true, empresa, ...expediente });
       }
 
       if (datos.accion === "guardar") {
@@ -215,9 +241,20 @@ export default {
 	        if (!validacion.ok) return responder({ ok: false, mensaje: validacion.mensaje }, validacion.status);
 	        estado = validacion.estado;
 	        estadoJson = JSON.stringify(estado);
+        const idempotencia = id + ":" + nueva;
+        limpiarConfirmaciones();
+        const firma = estadoJson + "\n" + datos.avance + "\n" + (datos.reporteHtml || "");
+        const confirmado = guardadosConfirmados.get(idempotencia);
+        if (confirmado) {
+          if (confirmado.firma !== firma) {
+            return responder({ ok: false, guardado: false, codigo: "REVISION_DESACTUALIZADA", mensaje: "Hay un respaldo mas reciente" }, 409);
+          }
+          return responder(confirmado.respuesta);
+        }
         const payload = {
           operacion: "guardar", tipoRespaldo: "autoguardado", id, empresa,
-          avance: datos.avance, revisionBase: base, revision: nueva, estadoJson
+          avance: datos.avance, revisionBase: base, revision: nueva, estadoJson,
+          idempotencia
         };
         if (typeof datos.reporteHtml === "string") {
           if (datos.reporteHtml.length > 700000) {
@@ -225,7 +262,17 @@ export default {
           }
           payload.reporteHtml = datos.reporteHtml;
         }
-        const guardado = await llamarFlujo(env.SWC_AUTOGUARDADO_URL, payload);
+        let entrada = guardadosEnCurso.get(idempotencia);
+        if (entrada && entrada.firma !== firma) {
+          return responder({ ok: false, guardado: false, codigo: "REVISION_DESACTUALIZADA", mensaje: "Hay un respaldo mas reciente" }, 409);
+        }
+        if (!entrada) {
+          entrada = { firma, tarea: llamarFlujo(env.SWC_AUTOGUARDADO_URL, payload) };
+          guardadosEnCurso.set(idempotencia, entrada);
+        }
+        let guardado;
+        try { guardado = await entrada.tarea; }
+        finally { guardadosEnCurso.delete(idempotencia); }
         if (guardado.status === 409) {
 	          return responder({ ok: false, guardado: false,
             codigo: "REVISION_DESACTUALIZADA", mensaje: "Hay un respaldo mas reciente" }, 409);
@@ -234,7 +281,11 @@ export default {
 	          return responder({ ok: false, guardado: false,
             mensaje: "SharePoint no confirmo el guardado" }, 503);
         }
-	        return responder({ ok: true, guardado: true, empresa, revision: nueva });
+        const respuestaOk = { ok: true, guardado: true, empresa, revision: nueva };
+        guardadosConfirmados.set(idempotencia, { firma, respuesta: respuestaOk, caduca: Date.now() + 120000 });
+        listadoCache = null;
+        listadoCaduca = 0;
+        return responder(respuestaOk);
       }
 	      return responder({ ok: false, mensaje: "Operacion no permitida" }, 400);
     } catch {
