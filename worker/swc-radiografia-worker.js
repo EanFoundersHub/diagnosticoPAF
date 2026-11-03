@@ -104,6 +104,24 @@ async function llamarFlujo(url, payload) {
   return { ok: r.ok, status: r.status, contenido };
 }
 
+// Un listado reciente se reutiliza entre consultas al mismo Worker.
+let listadoCache = null;
+let listadoCaduca = 0;
+let listadoEnCurso = null;
+async function obtenerListado(env) {
+  if (listadoCache && Date.now() < listadoCaduca) return listadoCache;
+  if (listadoEnCurso) return listadoEnCurso;
+  listadoEnCurso = (async () => {
+    const res = await llamarFlujo(env.SWC_CONSULTA_URL, { operacion: "consultar" });
+    if (!res.ok || !Array.isArray(res.contenido)) throw new Error("CONSULTA_LISTADO_FALLIDA");
+    listadoCache = res.contenido;
+    listadoCaduca = Date.now() + 30000;
+    return listadoCache;
+  })();
+  try { return await listadoEnCurso; }
+  finally { listadoEnCurso = null; }
+}
+
 function mismaCarpeta(ruta, empresa) {
   return String(ruta || "").replace(/\\/g, "/").split("/")
     .some(segmento => segmento.trim().toLowerCase() === empresa.trim().toLowerCase());
@@ -123,12 +141,14 @@ export default {
     if (request.method === "OPTIONS" && path === "/api/diagnostico") {
       return new Response(null, { status: 204, headers: responseHeaders });
     }
+    const mantenimiento = String(env.SWC_MANTENIMIENTO || "").toLowerCase() === "true";
     if (request.method === "GET" && path === "/") {
-      return responder({ ok: true, servicio: "SWC Radiografia", estado: "disponible" });
+      return responder({ ok: true, servicio: "SWC Radiografia", estado: mantenimiento ? "mantenimiento" : "disponible" });
     }
     if (path !== "/api/diagnostico" || request.method !== "POST") {
       return responder({ ok: false, mensaje: "Ruta no disponible" }, 404);
     }
+    if (mantenimiento) return responder({ ok: false, mensaje: "Servicio temporalmente en mantenimiento" }, 503);
     try {
       if (Number(request.headers.get("content-length") || 0) > 2000000) {
         return responder({ ok: false, mensaje: "Solicitud demasiado grande" }, 413);
@@ -149,11 +169,10 @@ export default {
       const { empresa, id } = autorizado;
 
       if (datos.accion === "consultar") {
-        const listado = await llamarFlujo(env.SWC_CONSULTA_URL, { operacion: "consultar" });
-        if (!listado.ok || !Array.isArray(listado.contenido)) {
-          return responder({ ok: false, mensaje: "No se pudo consultar el diagnostico" }, 502);
-        }
-        const archivo = listado.contenido.find(a =>
+        let listado;
+        try { listado = await obtenerListado(env); }
+        catch { return responder({ ok: false, mensaje: "No se pudo consultar el diagnostico" }, 502); }
+        const archivo = listado.find(a =>
           a.nombre === "estado.json" && mismaCarpeta(a.carpeta, empresa)
         );
         if (!archivo) return responder({ ok: true, empresa, existe: false, estado: null });
