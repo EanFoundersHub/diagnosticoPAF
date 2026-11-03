@@ -153,7 +153,7 @@ async function obtenerListado(env) {
   if (listadoCache && Date.now() < listadoCaduca) return listadoCache;
   if (listadoEnCurso) return listadoEnCurso;
   listadoEnCurso = (async () => {
-    const res = await llamarFlujo(urlFlujo(env, "consulta"), { operacion: "consultar" });
+    const res = await llamarFlujo(urlFlujo(env, "consulta"), { operacion: "consultar" }, timeoutFlujo(env, "SWC_CONSULTA_TIMEOUT_MS", 18000));
     if (!res.ok || !Array.isArray(res.contenido)) throw new Error("CONSULTA_LISTADO_FALLIDA");
     listadoCache = res.contenido;
     listadoCaduca = Date.now() + 30000;
@@ -176,7 +176,7 @@ async function consultarExpediente(env, empresa, id) {
     }
     const lectura = await llamarFlujo(urlFlujo(env, "consulta"), {
       operacion: "consultar", modo: "archivo", identificador: archivo.identificador
-    });
+    }, timeoutFlujo(env, "SWC_CONSULTA_TIMEOUT_MS", 18000));
     if (!lectura.ok || lectura.contenido?.ok !== true) throw new Error("LECTURA_FALLIDA");
     const raw = lectura.contenido.contenido;
     const estado = typeof raw === "string" ? JSON.parse(raw) : raw;
