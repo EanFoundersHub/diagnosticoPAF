@@ -48,7 +48,9 @@ nav.tabs button .tn{font-size:12px;color:var(--muted);font-weight:700;letter-spa
 nav.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
 nav.tabs button[aria-selected="true"] .tn{color:var(--accent)}
 nav.tabs button:not([aria-selected="true"]):hover{color:var(--ink);background:var(--soft-2)}
-.bar-r{margin-left:auto;display:flex;align-items:center;gap:18px;min-width:0}
+.bar-r{margin-left:auto;display:flex;align-items:center;gap:12px;min-width:0}
+.swc-control-transfer{min-height:36px;white-space:nowrap;font-size:12px!important;padding:7px 12px!important;background:var(--brand)!important;color:#fff!important;border:1px solid var(--brand)!important}
+.swc-control-transfer[hidden]{display:none!important}
 .pg{display:flex;align-items:center;gap:12px;min-width:0}
 .pg .num{font-weight:700;font-size:17px;color:var(--ink);font-variant-numeric:tabular-nums;min-width:48px;text-align:right}
 .pg .txt{font-size:13px;color:var(--muted);white-space:nowrap}
@@ -423,7 +425,7 @@ label.mxc:hover{border-color:var(--line)}
     <button role="tab" data-tab="radio"><span class="tn" aria-hidden="true">02</span>Radiografía</button>
     <button role="tab" data-tab="como"><span class="tn" aria-hidden="true">03</span>Cómo se calcula</button>
   </nav>
-  <div class="bar-r"><div class="pg" id="pg"></div><button type="button" class="savechip" id="saveChip" data-state="loading" disabled><i aria-hidden="true"></i><span class="l">Verificando enlace</span></button></div>
+  <div class="bar-r"><div class="pg" id="pg"></div><button type="button" class="btn swc-control-transfer" id="swcTomarControlHeader" hidden>Continuar acá</button><button type="button" class="savechip" id="saveChip" data-state="loading" disabled><i aria-hidden="true"></i><span class="l">Verificando enlace</span></button></div>
 </div></div>
 <div class="wrap">
   <section class="welcome" id="welcome" hidden aria-labelledby="wName">
@@ -954,6 +956,8 @@ return out;
     try { localStorage.setItem(LOCK_KEY, JSON.stringify({ id: TAB_ID, ts: Date.now() })); } catch (_e) {}
   }
   function mostrarBotonTomarControl() {
+    const botonCabecera = document.getElementById('swcTomarControlHeader');
+    if (botonCabecera) botonCabecera.hidden = !sesionRemota;
     const cont = document.getElementById('swcEstado');
     if (cont && !document.getElementById('swcTomarControl')) {
       const btn = document.createElement('button');
@@ -1038,6 +1042,8 @@ return out;
     });
   }
   function estadoSWC(m, esError = false) {
+    const botonCabecera = document.getElementById('swcTomarControlHeader');
+    if (botonCabecera) botonCabecera.hidden = !sesionRemota;
     const e = document.getElementById('swcEstado');
     if (!e) return;
     e.textContent = m;
@@ -1935,11 +1941,13 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
 	    renderProg();
 	    if (pestanaSecundaria) aplicarLecturaOtraPestana();
 	    if (sesionRemota) aplicarLecturaSesionRemota();
+    const botonCabecera = document.getElementById('swcTomarControlHeader');
+    if (botonCabecera) botonCabecera.hidden = !sesionRemota;
 	    if (mantenerScroll) requestAnimationFrame(() => window.scrollTo(0, posicion));
 	    else window.scrollTo(0, 0);
   }
   document.addEventListener('click', e => {
-    if (e.target.closest('#swcTomarControl')) {
+    if (e.target.closest('#swcTomarControl, #swcTomarControlHeader')) {
       if (sesionRemota) void continuarAcaRemoto(); else tomarControlAqui();
       return;
     }
@@ -2045,8 +2053,9 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     }
   });
   iniciarControlPestanas();
-  // Sin consultas automaticas periódicas: el formulario solo consulta al abrir o ante un conflicto.
-  // Los cambios reales activan el autoguardado. La sincronizacion entre sesiones usa revisiones.
+  // Detectar traspasos de edicion desde otro navegador sin sobrescribir datos.
+  // Una transferencia se confirma con las revisiones de SharePoint; la sesion previa pasa a lectura.
+  iniciarPulsoSesionRemota();
   void iniciar();
 })();
 </script>
