@@ -2053,9 +2053,8 @@ if (q.corte && tabla.some(c => c.col === 'act')) h += '<div class="row" style="m
     }
   });
   iniciarControlPestanas();
-  // Detectar traspasos de edicion desde otro navegador sin sobrescribir datos.
-  // Una transferencia se confirma con las revisiones de SharePoint; la sesion previa pasa a lectura.
-  iniciarPulsoSesionRemota();
+  // Evitar consultas periodicas a Power Automate. La conciliacion se realiza
+  // al abrir, guardar o solicitar expresamente el control de la edicion.
   void iniciar();
 })();
 </script>
