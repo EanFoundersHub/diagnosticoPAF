@@ -923,7 +923,7 @@ return out;
   }
   function iniciarPulsoSesionRemota() {
     temporizadorSesion = setInterval(async () => {
-      if (!cargado || bloqueado || conflictoRemoto || pestanaSecundaria || sesionRemota || enviando || pendiente || verificandoSesion) return;
+      if (!cargado || bloqueado || conflictoRemoto || pestanaSecundaria || sesionRemota || enviando || verificandoSesion) return;
       verificandoSesion = true;
       try {
         const consulta = await api('consultar');
