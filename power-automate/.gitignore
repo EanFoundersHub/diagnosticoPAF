@@ -2,3 +2,7 @@
 source-export/
 production-final-source-*/
 build/
+
+# Generadores experimentales del paquete aislado anterior; se conservan localmente.
+build-hotfix-package.mjs
+validate-hotfix-package.mjs
