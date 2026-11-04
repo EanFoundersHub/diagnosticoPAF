@@ -1,0 +1,4 @@
+# Exportaciones y paquetes generados pueden contener referencias de conexión.
+source-export/
+production-final-source-*/
+build/
